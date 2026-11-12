@@ -56,6 +56,7 @@ def main():
         "limits": "DDK evidence only; source occurrence or exported symbol does not prove vendor availability or runtime probe success.",
         "symvers": [], "system_maps": [], "configs": [], "source": [], "commands": [],
     }
+    all_exports = set()
     ddk_root = Path(os.environ.get("DDK_ROOT", "/opt/ddk"))
     roots = list(dict.fromkeys([root, root / "source", root / "build", root.parent / "common", ddk_root / "src" / root.name]))
     for directory in roots:
@@ -66,6 +67,7 @@ def main():
             entry = record(path)
             text = path.read_text(errors="replace")
             if name == "Module.symvers":
+                all_exports.update(line.split()[1] for line in text.splitlines() if len(line.split()) > 1)
                 entry["symbols"] = {symbol: [line for line in text.splitlines() if len(line.split()) > 1 and line.split()[1] == symbol] for symbol in SYMBOLS}
                 report["symvers"].append(entry)
             elif name == "System.map":
@@ -86,21 +88,30 @@ def main():
         entry["evidence"] = [{"line": number, "text": line} for number, line in enumerate(lines, 1) if any(re.search(r"\b" + re.escape(symbol) + r"\b", line) for symbol in SYMBOLS) or "__SYSCALL_DEFINEx" in line or "invoke_syscall" in line]
         report["source"].append(entry)
     commands = [["make", "-s", "-C", str(root), "kernelrelease"], ["clang", "--version"]]
+    module_nm = None
     if args.module and args.module.is_file():
         report["module"] = record(args.module)
         for names, flags in [(("llvm-nm", "nm"), ["-u"]), (("llvm-readelf", "readelf"), ["-p", ".modinfo"])]:
             tool = next((shutil.which(name) for name in names if shutil.which(name)), None)
             if tool:
                 commands.append([tool, *flags, str(args.module)])
+                if flags == ["-u"]:
+                    module_nm = tool
     for command in commands:
         try:
             result = subprocess.run(command, text=True, capture_output=True, timeout=30)
             report["commands"].append({"argv": command, "stdout": result.stdout, "stderr": result.stderr, "exit_code": result.returncode})
+            if module_nm and command[0] == module_nm and result.returncode == 0:
+                imports = sorted({line.split()[-1] for line in result.stdout.splitlines() if line.split()})
+                report["module_imports"] = imports
+                report["module_imports_absent_from_symvers"] = sorted(set(imports) - all_exports) if report["symvers"] else None
         except (OSError, subprocess.TimeoutExpired) as exc:
             report["commands"].append({"argv": command, "error": str(exc)})
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     print("DDK_AUDIT", args.output, "symvers=" + str(len(report["symvers"])), "source_files=" + str(sum("sha256" in item for item in report["source"])))
+    if report.get("module_imports_absent_from_symvers"):
+        print("DDK_AUDIT unresolved module exports:", ", ".join(report["module_imports_absent_from_symvers"]))
 
 
 if __name__ == "__main__":

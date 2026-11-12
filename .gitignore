@@ -17,3 +17,7 @@ modules.order
 .env
 .env.*
 !.env.example
+
+# Python audit tools
+__pycache__/
+*.pyc

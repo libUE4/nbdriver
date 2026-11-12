@@ -1,0 +1,650 @@
+{
+  "date_utc": "2026-11-12T10:08:01.771559+00:00",
+  "kmi": "android12-5.10",
+  "kdir": "/opt/ddk/kdir/android12-5.10",
+  "image_reference": "ghcr.io/ylarod/ddk:android12-5.10-20260828",
+  "source_commit": "0ec133e9af379772f5d0b753d550ca22cf15cfd9",
+  "limits": "DDK evidence only; source occurrence or exported symbol does not prove vendor availability or runtime probe success.",
+  "symvers": [
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/Module.symvers",
+      "sha256": "26dccaf975765b70355d18d22e16f60148607137a51fa10c46f3df67cfbea049",
+      "size": 881412,
+      "symbols": {
+        "anon_inode_getfile": [
+          "0xb96a2914\tanon_inode_getfile\tvmlinux\tEXPORT_SYMBOL_GPL\t"
+        ],
+        "get_unused_fd_flags": [
+          "0xa843805a\tget_unused_fd_flags\tvmlinux\tEXPORT_SYMBOL\t"
+        ],
+        "put_unused_fd": [
+          "0x3f4547a7\tput_unused_fd\tvmlinux\tEXPORT_SYMBOL\t"
+        ],
+        "fd_install": [
+          "0x7dbab506\tfd_install\tvmlinux\tEXPORT_SYMBOL\t"
+        ],
+        "fput": [
+          "0xc0598939\tfput\tvmlinux\tEXPORT_SYMBOL\t"
+        ],
+        "task_work_add": [],
+        "register_kprobe": [
+          "0xc502eb6d\tregister_kprobe\tvmlinux\tEXPORT_SYMBOL_GPL\t"
+        ],
+        "unregister_kprobe": [
+          "0x18b23dc5\tunregister_kprobe\tvmlinux\tEXPORT_SYMBOL_GPL\t"
+        ],
+        "kallsyms_lookup_name": [],
+        "sys_call_table": [],
+        "__arm64_sys_ni_syscall": [],
+        "sys_ni_syscall": [],
+        "copy_to_kernel_nofault": [],
+        "stop_machine": [
+          "0xdfc04014\tstop_machine\tvmlinux\tEXPORT_SYMBOL_GPL\t"
+        ],
+        "__set_fixmap": [],
+        "dcache_clean_inval_poc": [],
+        "__flush_dcache_area": [],
+        "init_mm": [],
+        "__arm64_sys_reboot": [],
+        "__se_sys_reboot": [],
+        "__arch_copy_to_user": [
+          "0x6b2941b2\t__arch_copy_to_user\tvmlinux\tEXPORT_SYMBOL\t"
+        ]
+      }
+    }
+  ],
+  "system_maps": [
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/System.map",
+      "sha256": "fbf3b889272a04232f9c0591b7b57e87b7be8c5547c317a3ba475f68ddf7b347",
+      "size": 6477623,
+      "symbols": {
+        "anon_inode_getfile": [
+          "ffffffc00861bc70 T anon_inode_getfile"
+        ],
+        "get_unused_fd_flags": [
+          "ffffffc0085b25fc T get_unused_fd_flags"
+        ],
+        "put_unused_fd": [
+          "ffffffc0085b2258 T put_unused_fd"
+        ],
+        "fd_install": [
+          "ffffffc0085b269c T fd_install"
+        ],
+        "fput": [
+          "ffffffc00856d000 T fput"
+        ],
+        "task_work_add": [
+          "ffffffc00819bc8c T task_work_add"
+        ],
+        "register_kprobe": [
+          "ffffffc00831ad2c T register_kprobe"
+        ],
+        "unregister_kprobe": [
+          "ffffffc00831a820 T unregister_kprobe"
+        ],
+        "kallsyms_lookup_name": [
+          "ffffffc0082d3558 T kallsyms_lookup_name"
+        ],
+        "sys_call_table": [
+          "ffffffc00a1acd98 D sys_call_table"
+        ],
+        "__arm64_sys_ni_syscall": [
+          "ffffffc0080abe2c T __arm64_sys_ni_syscall"
+        ],
+        "sys_ni_syscall": [
+          "ffffffc0081a4ba0 T sys_ni_syscall"
+        ],
+        "copy_to_kernel_nofault": [
+          "ffffffc00843e7d4 T copy_to_kernel_nofault"
+        ],
+        "stop_machine": [
+          "ffffffc0082ff934 T stop_machine"
+        ],
+        "__set_fixmap": [
+          "ffffffc0080d3080 T __set_fixmap"
+        ],
+        "dcache_clean_inval_poc": [],
+        "__flush_dcache_area": [
+          "ffffffc0080162c0 T __flush_dcache_area"
+        ],
+        "init_mm": [
+          "ffffffc00a9208b8 D init_mm"
+        ],
+        "__arm64_sys_reboot": [
+          "ffffffc0081aade8 T __arm64_sys_reboot"
+        ],
+        "__se_sys_reboot": [],
+        "__arch_copy_to_user": [
+          "ffffffc00801f280 T __arch_copy_to_user"
+        ]
+      }
+    }
+  ],
+  "configs": [
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/.config",
+      "sha256": "4dbc898a0f26407c7c4b0fc9ac7f8d4c65903387579157f60838ac648dd32bfd",
+      "size": 181294,
+      "values": {
+        "CONFIG_ARM64": "CONFIG_ARM64=y",
+        "CONFIG_MODULES": "CONFIG_MODULES=y",
+        "CONFIG_MODVERSIONS": "CONFIG_MODVERSIONS=y",
+        "CONFIG_MODULE_SIG": "# CONFIG_MODULE_SIG is not set",
+        "CONFIG_MODULE_SIG_FORCE": "not recorded",
+        "CONFIG_KPROBES": "CONFIG_KPROBES=y",
+        "CONFIG_KALLSYMS": "CONFIG_KALLSYMS=y",
+        "CONFIG_KALLSYMS_ALL": "CONFIG_KALLSYMS_ALL=y",
+        "CONFIG_LTO_CLANG": "CONFIG_LTO_CLANG=y",
+        "CONFIG_LTO_CLANG_THIN": "# CONFIG_LTO_CLANG_THIN is not set",
+        "CONFIG_CFI_CLANG": "CONFIG_CFI_CLANG=y",
+        "CONFIG_CFI_PERMISSIVE": "# CONFIG_CFI_PERMISSIVE is not set",
+        "CONFIG_ARM64_4K_PAGES": "CONFIG_ARM64_4K_PAGES=y",
+        "CONFIG_ARM64_16K_PAGES": "# CONFIG_ARM64_16K_PAGES is not set",
+        "CONFIG_ARM64_64K_PAGES": "# CONFIG_ARM64_64K_PAGES is not set",
+        "CONFIG_STRICT_KERNEL_RWX": "CONFIG_STRICT_KERNEL_RWX=y",
+        "CONFIG_RANDOMIZE_BASE": "CONFIG_RANDOMIZE_BASE=y",
+        "CONFIG_TRIM_UNUSED_KSYMS": "# CONFIG_TRIM_UNUSED_KSYMS is not set",
+        "CONFIG_UNUSED_KSYMS_WHITELIST": "not recorded",
+        "CONFIG_ANDROID_KABI_RESERVE": "CONFIG_ANDROID_KABI_RESERVE=y"
+      }
+    }
+  ],
+  "source": [
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/Makefile",
+      "sha256": "72b1c70a137db7847ff5ed9eea8b66e3f88362243f9e1f9ffe1a6dd0e958e967",
+      "size": 133,
+      "relative": "Makefile",
+      "evidence": []
+    },
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/source/kernel/kallsyms.c",
+      "sha256": "a75e8f9ea0f6e1764a4cf73d5920a64571c2695a2234ee7cd16cc2a23ab40a5f",
+      "size": 19987,
+      "relative": "kernel/kallsyms.c",
+      "evidence": [
+        {
+          "line": 185,
+          "text": "unsigned long kallsyms_lookup_name(const char *name)"
+        }
+      ]
+    },
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/source/kernel/task_work.c",
+      "sha256": "5f7ead3d57024d1cbedcd725d7f0e022a56ca474af896a4c7ad1e4daba4a5e5d",
+      "size": 5364,
+      "relative": "kernel/task_work.c",
+      "evidence": [
+        {
+          "line": 9,
+          "text": " * task_work_add - ask the @task to execute @work->func()"
+        },
+        {
+          "line": 32,
+          "text": "int task_work_add(struct task_struct *task, struct callback_head *work,"
+        },
+        {
+          "line": 65,
+          "text": " * task_work_cancel_match - cancel a pending work added by task_work_add()"
+        },
+        {
+          "line": 86,
+          "text": "\t * Either we raced with task_work_add() which added the"
+        },
+        {
+          "line": 108,
+          "text": " * task_work_cancel_func - cancel a pending work matching a function added by task_work_add()"
+        },
+        {
+          "line": 130,
+          "text": " * task_work_cancel - cancel a pending work added by task_work_add()"
+        },
+        {
+          "line": 149,
+          "text": " * task_work_run - execute the works added by task_work_add()"
+        },
+        {
+          "line": 153,
+          "text": " * it exits. In the latter case task_work_add() can no longer add the"
+        },
+        {
+          "line": 163,
+          "text": "\t\t * work->func() can do task_work_add(), do not set"
+        }
+      ]
+    },
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/source/kernel/kprobes.c",
+      "sha256": "fb1a28085c1ba30cc5217cd88e350063f19f210dc0bed1015e08f9b40a6eaae3",
+      "size": 74607,
+      "relative": "kernel/kprobes.c",
+      "evidence": [
+        {
+          "line": 72,
+          "text": "\treturn ((kprobe_opcode_t *)(kallsyms_lookup_name(name)));"
+        },
+        {
+          "line": 518,
+          "text": "\t * stop_machine() and cpu-hotplug modifies online_cpus."
+        },
+        {
+          "line": 521,
+          "text": "\t * text_mutex but stop_machine can not be done because online_cpus"
+        },
+        {
+          "line": 1461,
+          "text": "\t\t\t * freed by unregister_kprobe."
+        },
+        {
+          "line": 1695,
+          "text": "int register_kprobe(struct kprobe *p)"
+        },
+        {
+          "line": 1712,
+          "text": "\t/* User can pass only KPROBE_FLAG_DISABLED to register_kprobe */"
+        },
+        {
+          "line": 1762,
+          "text": "EXPORT_SYMBOL_GPL(register_kprobe);"
+        },
+        {
+          "line": 1906,
+          "text": "\t\tret = register_kprobe(kps[i]);"
+        },
+        {
+          "line": 1917,
+          "text": "void unregister_kprobe(struct kprobe *p)"
+        },
+        {
+          "line": 1921,
+          "text": "EXPORT_SYMBOL_GPL(unregister_kprobe);"
+        },
+        {
+          "line": 2190,
+          "text": "\tret = register_kprobe(&rp->kp);"
+        }
+      ]
+    },
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/source/kernel/reboot.c",
+      "sha256": "1ae6a6de326dc9937b457ee6d0a510e902f01caec20d1b1264ddb90a24bdf6ef",
+      "size": 14698,
+      "relative": "kernel/reboot.c",
+      "evidence": []
+    },
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/source/fs/anon_inodes.c",
+      "sha256": "f7b3d5f19a1f6daff1498a73c1d72405448c10b6c030856bbcd6f2c8b8cb6ca2",
+      "size": 6928,
+      "relative": "fs/anon_inodes.c",
+      "evidence": [
+        {
+          "line": 128,
+          "text": " * anon_inode_getfile - creates a new file instance by hooking it up to an"
+        },
+        {
+          "line": 139,
+          "text": " * All the files created with anon_inode_getfile() will share a single inode,"
+        },
+        {
+          "line": 143,
+          "text": "struct file *anon_inode_getfile(const char *name,"
+        },
+        {
+          "line": 149,
+          "text": "EXPORT_SYMBOL_GPL(anon_inode_getfile);"
+        },
+        {
+          "line": 160,
+          "text": "\terror = get_unused_fd_flags(flags);"
+        },
+        {
+          "line": 171,
+          "text": "\tfd_install(fd, file);"
+        },
+        {
+          "line": 176,
+          "text": "\tput_unused_fd(fd);"
+        }
+      ]
+    },
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/source/fs/file.c",
+      "sha256": "3a2efe8ae6ce88fa7d2129c5f347d53b19e981c13a472aee32650c504d32a2fa",
+      "size": 33797,
+      "relative": "fs/file.c",
+      "evidence": [
+        {
+          "line": 591,
+          "text": "int get_unused_fd_flags(unsigned flags)"
+        },
+        {
+          "line": 595,
+          "text": "EXPORT_SYMBOL(get_unused_fd_flags);"
+        },
+        {
+          "line": 605,
+          "text": "void put_unused_fd(unsigned int fd)"
+        },
+        {
+          "line": 613,
+          "text": "EXPORT_SYMBOL(put_unused_fd);"
+        },
+        {
+          "line": 622,
+          "text": " * fput() the struct file we are about to overwrite in this case."
+        },
+        {
+          "line": 632,
+          "text": " * fd_install() instead."
+        },
+        {
+          "line": 661,
+          "text": " * as if they had called fput(file)."
+        },
+        {
+          "line": 663,
+          "text": "void fd_install(unsigned int fd, struct file *file)"
+        },
+        {
+          "line": 668,
+          "text": "EXPORT_SYMBOL(fd_install);"
+        },
+        {
+          "line": 850,
+          "text": " * variant of close_fd that gets a ref on the file for later fput."
+        },
+        {
+          "line": 852,
+          "text": " * an fput()."
+        },
+        {
+          "line": 1209,
+          "text": "\t\tnew_fd = get_unused_fd_flags(o_flags);"
+        },
+        {
+          "line": 1220,
+          "text": "\t\t\t\tput_unused_fd(new_fd);"
+        },
+        {
+          "line": 1226,
+          "text": "\t\tfd_install(new_fd, get_file(file));"
+        },
+        {
+          "line": 1298,
+          "text": "\t\tret = get_unused_fd_flags(0);"
+        },
+        {
+          "line": 1300,
+          "text": "\t\t\tfd_install(ret, file);"
+        },
+        {
+          "line": 1302,
+          "text": "\t\t\tfput(file);"
+        },
+        {
+          "line": 1315,
+          "text": "\t\tfd_install(err, file);"
+        }
+      ]
+    },
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/source/mm/maccess.c",
+      "sha256": "b55ede5eca71bcb6a4c1616888e33cf05ae534c655ef2534e2b4f55887390678",
+      "size": 8886,
+      "relative": "mm/maccess.c",
+      "evidence": [
+        {
+          "line": 51,
+          "text": "long copy_to_kernel_nofault(void *dst, const void *src, size_t size)"
+        },
+        {
+          "line": 127,
+          "text": " * copy_to_kernel_nofault(): safely attempt to write to a location"
+        },
+        {
+          "line": 135,
+          "text": "long copy_to_kernel_nofault(void *dst, const void *src, size_t size)"
+        }
+      ]
+    },
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/source/arch/arm64/kernel/sys.c",
+      "sha256": "58b4d8988435feb7542f5730d2002981421ef016de2053a0bec2ee6e87c54c44",
+      "size": 1497,
+      "relative": "arch/arm64/kernel/sys.c",
+      "evidence": [
+        {
+          "line": 39,
+          "text": "asmlinkage long sys_ni_syscall(void);"
+        },
+        {
+          "line": 41,
+          "text": "asmlinkage long __arm64_sys_ni_syscall(const struct pt_regs *__unused)"
+        },
+        {
+          "line": 43,
+          "text": "\treturn sys_ni_syscall();"
+        },
+        {
+          "line": 58,
+          "text": "const syscall_fn_t sys_call_table[__NR_syscalls] = {"
+        },
+        {
+          "line": 59,
+          "text": "\t[0 ... __NR_syscalls - 1] = __arm64_sys_ni_syscall,"
+        }
+      ]
+    },
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/source/arch/arm64/kernel/syscall.c",
+      "sha256": "cc21a34e3d5e4719031446c5d7808df361adde2d8ba3e059dca3c93d2330d2c4",
+      "size": 5721,
+      "relative": "arch/arm64/kernel/syscall.c",
+      "evidence": [
+        {
+          "line": 18,
+          "text": "long sys_ni_syscall(void);"
+        },
+        {
+          "line": 31,
+          "text": "\treturn sys_ni_syscall();"
+        },
+        {
+          "line": 34,
+          "text": "static long __invoke_syscall(struct pt_regs *regs, syscall_fn_t syscall_fn)"
+        },
+        {
+          "line": 39,
+          "text": "static void invoke_syscall(struct pt_regs *regs, unsigned int scno,"
+        },
+        {
+          "line": 48,
+          "text": "\t\tret = __invoke_syscall(regs, syscall_fn);"
+        },
+        {
+          "line": 155,
+          "text": "\tinvoke_syscall(regs, scno, sc_nr, syscall_table);"
+        },
+        {
+          "line": 194,
+          "text": "\tel0_svc_common(regs, regs->regs[8], __NR_syscalls, sys_call_table);"
+        }
+      ]
+    },
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/source/arch/arm64/include/asm/syscall_wrapper.h",
+      "sha256": "adc9e63252b1062464b81ddcb14139558aef4ba78a72dd3f9bd514939106994c",
+      "size": 3120,
+      "relative": "arch/arm64/include/asm/syscall_wrapper.h",
+      "evidence": [
+        {
+          "line": 43,
+          "text": "\t\treturn sys_ni_syscall();\t\t\t\t\t\t\\"
+        },
+        {
+          "line": 51,
+          "text": "#define __SYSCALL_DEFINEx(x, name, ...)\t\t\t\t\t\t\\"
+        },
+        {
+          "line": 78,
+          "text": "\t\treturn sys_ni_syscall();\t\t\t\t\t\\"
+        }
+      ]
+    },
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/source/arch/arm64/include/asm/cacheflush.h",
+      "sha256": "576089eaa4322394c924b16e6c838e1eddcb7e814cd7c474d25ed0de54b9184c",
+      "size": 4793,
+      "relative": "arch/arm64/include/asm/cacheflush.h",
+      "evidence": [
+        {
+          "line": 58,
+          "text": " *\t__flush_dcache_area(kaddr, size)"
+        },
+        {
+          "line": 66,
+          "text": "extern void __flush_dcache_area(void *addr, size_t len);"
+        }
+      ]
+    },
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/source/include/linux/task_work.h",
+      "sha256": "5bb8717059fdd0f5bc4dc7b00738db141afb4605c05b5b290a904f1c5403a5a3",
+      "size": 934,
+      "relative": "include/linux/task_work.h",
+      "evidence": [
+        {
+          "line": 22,
+          "text": "int task_work_add(struct task_struct *task, struct callback_head *twork,"
+        }
+      ]
+    },
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/source/android/abi_gki_aarch64_generic",
+      "sha256": "8674a1c2cb4d095de1a5c0c7c005b6efb607d12cd498d15d9db31f94087ac503",
+      "size": 52589,
+      "relative": "android/abi_gki_aarch64_generic",
+      "evidence": [
+        {
+          "line": 32,
+          "text": "  __arch_copy_to_user"
+        },
+        {
+          "line": 739,
+          "text": "  fd_install"
+        },
+        {
+          "line": 755,
+          "text": "  fput"
+        },
+        {
+          "line": 807,
+          "text": "  get_unused_fd_flags"
+        },
+        {
+          "line": 1454,
+          "text": "  put_unused_fd"
+        },
+        {
+          "line": 1815,
+          "text": "  stop_machine"
+        }
+      ]
+    },
+    {
+      "path": "/opt/ddk/kdir/android12-5.10/source/android/abi_gki_aarch64_qcom",
+      "sha256": "384394e3cbf1ceac85acffb56cef33f9fe9610b6c33ca772d49a0ea2108dbbae",
+      "size": 72080,
+      "relative": "android/abi_gki_aarch64_qcom",
+      "evidence": [
+        {
+          "line": 39,
+          "text": "  anon_inode_getfile"
+        },
+        {
+          "line": 45,
+          "text": "  __arch_copy_to_user"
+        },
+        {
+          "line": 896,
+          "text": "  fd_install"
+        },
+        {
+          "line": 914,
+          "text": "  fput"
+        },
+        {
+          "line": 983,
+          "text": "  get_unused_fd_flags"
+        },
+        {
+          "line": 1879,
+          "text": "  put_unused_fd"
+        },
+        {
+          "line": 1974,
+          "text": "  register_kprobe"
+        },
+        {
+          "line": 2394,
+          "text": "  stop_machine"
+        },
+        {
+          "line": 2862,
+          "text": "  unregister_kprobe"
+        }
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "argv": [
+        "make",
+        "-s",
+        "-C",
+        "/opt/ddk/kdir/android12-5.10",
+        "kernelrelease"
+      ],
+      "stdout": "5.10.252\n",
+      "stderr": "",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "clang",
+        "--version"
+      ],
+      "stdout": "Android (7284624, based on r416183b) clang version 12.0.5 (https://android.googlesource.com/toolchain/llvm-project c935d99d7cf2016289302412d708641d52d2f7ee)\nTarget: x86_64-unknown-linux-gnu\nThread model: posix\nInstalledDir: /opt/ddk/clang/clang-r416183b/bin\n",
+      "stderr": "",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "/opt/ddk/clang/clang-r416183b/bin/llvm-nm",
+        "-u",
+        "src/nbdriver.ko"
+      ],
+      "stdout": "                 U __arch_copy_to_user\n                 U __stack_chk_fail\n                 U __stack_chk_guard\n                 U anon_inode_getfile\n                 U arm64_const_caps_ready\n                 U cpu_hwcap_keys\n                 U cpu_hwcaps\n                 U fd_install\n                 U fput\n                 U get_unused_fd_flags\n                 U gic_nonsecure_priorities\n                 U kfree\n                 U kmalloc_caches\n                 U kmem_cache_alloc_trace\n                 U memset\n                 U module_put\n                 U printk\n                 U put_unused_fd\n                 U register_kprobe\n                 U task_work_add\n                 U try_module_get\n                 U unregister_kprobe\n",
+      "stderr": "",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "/opt/ddk/clang/clang-r416183b/bin/llvm-readelf",
+        "-p",
+        ".modinfo",
+        "src/nbdriver.ko"
+      ],
+      "stdout": "String dump of section '.modinfo':\n[     0] description=nbdriver ioctl communication\n[    29] license=GPL\n[    35] version=0.1.0\n[    43] depends=\n[    4c] name=nbdriver\n[    5a] srcversion=25AB0AD8EE68FC1D4F26C13\n[    7d] vermagic=5.10.252-dirty SMP preempt mod_unload modversions aarch64\n",
+      "stderr": "",
+      "exit_code": 0
+    }
+  ],
+  "module": {
+    "path": "src/nbdriver.ko",
+    "sha256": "d924b4f1befff9ca9f2accb47849143ab72bdf1c076af162653b52020b6d2be9",
+    "size": 411056
+  }
+}

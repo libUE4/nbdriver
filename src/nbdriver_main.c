@@ -6,6 +6,8 @@
 #include "nbdriver_abi.h"
 #include "nbdriver_comm.h"
 #include "nbdriver_entry.h"
+#include "nbdriver_ksym.h"
+#include "nbdriver_log.h"
 
 static int __init nbdriver_init(void)
 {
@@ -13,25 +15,39 @@ static int __init nbdriver_init(void)
 
 	ret = nbdriver_comm_init();
 	if (ret) {
-		pr_err("nbdriver: stage=module_init dependency=comm status=failed error=%d\n", ret);
-		return ret;
-	}
-	ret = nbdriver_entry_init();
-	if (ret) {
-		pr_err("nbdriver: stage=module_init dependency=entry status=failed error=%d\n", ret);
-		nbdriver_comm_exit();
+		nbd_err("stage=module_init dependency=comm error=%d\n", ret);
 		return ret;
 	}
 
-	pr_info("nbdriver: 已加载, abi=%u\n", NBDRIVER_ABI_VERSION);
+	ret = nbdriver_ksym_init();
+	if (ret) {
+		nbd_err("stage=module_init dependency=ksym error=%d\n", ret);
+		goto err_comm;
+	}
+
+	ret = nbdriver_entry_init();
+	if (ret) {
+		nbd_err("stage=module_init dependency=entry error=%d\n", ret);
+		goto err_ksym;
+	}
+
+	nbd_info("stage=module_init status=loaded abi=%u entry=%s\n",
+		 NBDRIVER_ABI_VERSION, nbdriver_entry_target());
 	return 0;
+
+err_ksym:
+	nbdriver_ksym_exit();
+err_comm:
+	nbdriver_comm_exit();
+	return ret;
 }
 
 static void __exit nbdriver_exit(void)
 {
 	nbdriver_entry_exit();
+	nbdriver_ksym_exit();
 	nbdriver_comm_exit();
-	pr_info("nbdriver: 已卸载\n");
+	nbd_info("stage=module_exit status=unloaded\n");
 }
 
 module_init(nbdriver_init);

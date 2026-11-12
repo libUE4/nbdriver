@@ -1,0 +1,110 @@
+[
+  {
+    "id": "google-5.4",
+    "vendor": "Google ACK",
+    "repo": "aosp-mirror/kernel_common",
+    "ref": "android11-5.4-lts"
+  },
+  {
+    "id": "google-5.10",
+    "vendor": "Google ACK",
+    "repo": "aosp-mirror/kernel_common",
+    "ref": "android12-5.10-lts"
+  },
+  {
+    "id": "google-5.15",
+    "vendor": "Google ACK",
+    "repo": "aosp-mirror/kernel_common",
+    "ref": "android13-5.15-lts"
+  },
+  {
+    "id": "google-6.1",
+    "vendor": "Google ACK",
+    "repo": "aosp-mirror/kernel_common",
+    "ref": "android14-6.1-lts"
+  },
+  {
+    "id": "google-6.6",
+    "vendor": "Google ACK",
+    "repo": "aosp-mirror/kernel_common",
+    "ref": "android15-6.6-lts"
+  },
+  {
+    "id": "google-6.12",
+    "vendor": "Google ACK",
+    "repo": "aosp-mirror/kernel_common",
+    "ref": "android16-6.12-lts"
+  },
+  {
+    "id": "google-6.18",
+    "vendor": "Google ACK",
+    "repo": "aosp-mirror/kernel_common",
+    "ref": "android17-6.18-lts"
+  },
+  {
+    "id": "xiaomi-fuxi",
+    "vendor": "Xiaomi",
+    "repo": "MiCode/Xiaomi_Kernel_OpenSource",
+    "ref": "fuxi-t-oss"
+  },
+  {
+    "id": "xiaomi-shennong",
+    "vendor": "Xiaomi",
+    "repo": "MiCode/Xiaomi_Kernel_OpenSource",
+    "ref": "shennong-u-oss"
+  },
+  {
+    "id": "xiaomi-dada",
+    "vendor": "Xiaomi",
+    "repo": "MiCode/Xiaomi_Kernel_OpenSource",
+    "ref": "dada-v-oss"
+  },
+  {
+    "id": "oppo-mt6983",
+    "vendor": "OPPO",
+    "repo": "oppo-source/android_kernel_5.10_oppo_mt6983",
+    "ref": "oppo/mt6983_v_15.0.0_find_x5_pro"
+  },
+  {
+    "id": "oppo-sm8650",
+    "vendor": "OPPO",
+    "repo": "oppo-source/android_kernel_common_oppo_sm8650",
+    "ref": "oppo/sm8650_v_15.0.0_find_x7_ultra"
+  },
+  {
+    "id": "oppo-sm8750",
+    "vendor": "OPPO",
+    "repo": "oppo-source/android_kernel_common_oppo_sm8750",
+    "ref": "oppo/sm8750_v_15.0.1_find_n5"
+  },
+  {
+    "id": "oneplus-sm8550",
+    "vendor": "OnePlus",
+    "repo": "OnePlusOSS/android_kernel_common_oneplus_sm8550",
+    "ref": "oneplus/sm8550_v_15.0.0_oneplus11"
+  },
+  {
+    "id": "oneplus-sm8650",
+    "vendor": "OnePlus",
+    "repo": "OnePlusOSS/android_kernel_common_oneplus_sm8650",
+    "ref": "oneplus/sm8650_v_15.0.0_oneplus12"
+  },
+  {
+    "id": "oneplus-sm8750",
+    "vendor": "OnePlus",
+    "repo": "OnePlusOSS/android_kernel_common_oneplus_sm8750",
+    "ref": "oneplus/sm8750_v_15.0.0_oneplus_13"
+  },
+  {
+    "id": "xiaomi-venus",
+    "vendor": "Xiaomi",
+    "repo": "MiCode/Xiaomi_Kernel_OpenSource",
+    "ref": "venus-r-oss"
+  },
+  {
+    "id": "xiaomi-zeus",
+    "vendor": "Xiaomi",
+    "repo": "MiCode/Xiaomi_Kernel_OpenSource",
+    "ref": "zeus-s-oss"
+  }
+]

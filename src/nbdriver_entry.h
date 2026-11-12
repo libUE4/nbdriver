@@ -2,9 +2,19 @@
 #ifndef NBDRIVER_ENTRY_H
 #define NBDRIVER_ENTRY_H
 
+/*
+ * 首次取 FD 的入口。reboot 探针是唯一跨 5.10-6.18 可用的形态：
+ *   - sys_call_table 槽位改写要写内核文本段，缺可用的导出符号
+ *   - kprobe 只需 register_kprobe，全系 EXPORT_SYMBOL_GPL
+ */
 int nbdriver_entry_init(void);
 void nbdriver_entry_exit(void);
+
+/* 已注册的探针目标符号名，未注册返回 NULL。 */
+const char *nbdriver_entry_target(void);
+
 int nbdriver_reboot_entry_init(void);
 void nbdriver_reboot_entry_exit(void);
+const char *nbdriver_reboot_entry_target(void);
 
 #endif /* NBDRIVER_ENTRY_H */

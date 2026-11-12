@@ -1,0 +1,32 @@
+{
+  "kmi": "android16-6.12",
+  "module_sha256": "35dbd68039b4d1b4608e3416532095514acb800ab9c5e48745882f61a281a0f7",
+  "imports": [
+    "__arch_copy_to_user",
+    "__kmalloc_cache_noprof",
+    "__stack_chk_fail",
+    "_printk",
+    "alt_cb_patch_nops",
+    "anon_inode_getfile",
+    "fd_install",
+    "fput",
+    "get_unused_fd_flags",
+    "kfree",
+    "kmalloc_caches",
+    "mem_alloc_profiling_key",
+    "module_put",
+    "put_unused_fd",
+    "register_kprobe",
+    "task_work_add",
+    "try_module_get",
+    "unregister_kprobe"
+  ],
+  "surveyed_imports_absent_from_symvers": [],
+  "version_sections": [
+    "[50] __versions        PROGBITS        0000000000000000 001800 000000 00   A  0   0  8",
+    "[51] __version_ext_crcs PROGBITS       0000000000000000 001800 000000 00   A  0   0  4",
+    "[52] __version_ext_names PROGBITS      0000000000000000 001800 000001 00   A  0   0  1"
+  ],
+  "symbol_report_sha256": "23cc8b865e8beae5bdb76f250e9c9d895b70f58a2e835699b2a806f2f972ff20",
+  "limits": "Absence checked against recorded watched symbols only, not full exports."
+}

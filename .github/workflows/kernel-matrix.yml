@@ -71,6 +71,12 @@ jobs:
                 ARCH=arm64 LLVM=1 LLVM_IAS=1
               python3 tools/ddk_symbol_audit.py --kdir "$KERNEL_SRC" \
                 --module src/nbdriver.ko --output "out/ddk-symbols-${KMI}.json"
+              # .ko 允许带未定义符号链接成功，真正失败在 insmod。
+              # 若导入的符号不在 Module.symvers 里，当场失败，不把“编过”当成“能加载”。
+              python3 tools/check_undefined.py \
+                --symvers "$KERNEL_SRC/Module.symvers" \
+                --module src/nbdriver.ko \
+                --kmi "$KMI"
             '
           sudo chown -R -- "$(id -u):$(id -g)" src out
           test -s src/nbdriver.ko
