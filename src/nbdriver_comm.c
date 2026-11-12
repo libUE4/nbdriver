@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/anon_inodes.h>
+#include <linux/cred.h>
 #include <linux/errno.h>
 #include <linux/fdtable.h>
 #include <linux/file.h>
@@ -14,7 +15,7 @@
 /*
  * 这一层只依赖全系 EXPORT_SYMBOL(_GPL) 的接口：
  * anon_inode_getfile / get_unused_fd_flags / put_unused_fd / fd_install。
- * DDK 六个 KMI 的 Module.symvers 已确认全部导出，可直接静态链接。
+ * 本项目的 DDK KMI 矩阵按目标 Module.symvers 检查导出情况。
  */
 
 static long nbdriver_ioctl(struct file *file, unsigned int command,
@@ -28,6 +29,8 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 	};
 
 	(void)file;
+	if (!uid_eq(current_euid(), GLOBAL_ROOT_UID))
+		return -EPERM;
 
 	switch (command) {
 	case NBDRIVER_IOC_GET_ABI:
@@ -49,11 +52,24 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 	}
 }
 
+static int nbdriver_device_open(struct inode *inode, struct file *file)
+{
+	(void)inode;
+	(void)file;
+	return uid_eq(current_euid(), GLOBAL_ROOT_UID) ? 0 : -EPERM;
+}
+
 static const struct file_operations nbdriver_fops = {
 	.owner = THIS_MODULE,
+	.open = nbdriver_device_open,
 	.unlocked_ioctl = nbdriver_ioctl,
 	.compat_ioctl = nbdriver_ioctl,
 };
+
+const struct file_operations *nbdriver_comm_fops(void)
+{
+	return &nbdriver_fops;
+}
 
 int nbdriver_comm_install_fd(int __user *output_fd)
 {
@@ -83,10 +99,7 @@ int nbdriver_comm_install_fd(int __user *output_fd)
 		return error;
 	}
 
-	/*
-	 * 先装 fd 再回报，避免用户态拿到一个尚未 install 的号；
-	 * 这里先 copy 再 install 是为了在 copy 失败时能干净回滚。
-	 */
+	/* 先向当前任务的用户空间写入编号，再安装 FD；copy 失败可回滚。 */
 	if (copy_to_user(output_fd, &fd, sizeof(fd))) {
 		nbd_err("stage=install_fd operation=copy_to_user error=%d\n", -EFAULT);
 		fput(file);
