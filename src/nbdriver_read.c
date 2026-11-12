@@ -21,8 +21,9 @@
 #include "nbdriver_walk.h"
 
 static __typeof__(&mm_access) nbdriver_mm_access;
-typedef __typeof__(&memremap) nbdriver_memremap_fn_t;
-typedef __typeof__(&memunmap) nbdriver_memunmap_fn_t;
+typedef void *(*nbdriver_memremap_fn_t)(resource_size_t offset,
+						 size_t size, unsigned long flags);
+typedef void (*nbdriver_memunmap_fn_t)(void *addr);
 static nbdriver_memremap_fn_t nbdriver_memremap;
 static nbdriver_memunmap_fn_t nbdriver_memunmap;
 
