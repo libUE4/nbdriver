@@ -1,0 +1,77 @@
+{
+  "scope": "Initial scaffold only; no original implementation was migrated.",
+  "checks": [
+    {
+      "name": "shell syntax",
+      "command": [
+        "bash",
+        "-n",
+        "build.sh"
+      ],
+      "stdin": null,
+      "stdout": "",
+      "stderr": "",
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "passed": true
+    },
+    {
+      "name": "build help",
+      "command": [
+        "./build.sh",
+        "help"
+      ],
+      "stdin": null,
+      "stdout": "make: Entering directory '/root/workspace/nbdriver'\nmake [all|clean] KDIR=/path/to/kernel/build [ARCH=arm64 LLVM=1 LLVM_IAS=1]\nmake: Leaving directory '/root/workspace/nbdriver'\n",
+      "stderr": "",
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "passed": true
+    },
+    {
+      "name": "shared ABI C header",
+      "command": [
+        "cc",
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Iinclude",
+        "-fsyntax-only",
+        "-x",
+        "c",
+        "-"
+      ],
+      "stdin": "#include \"nbdriver_abi.h\"\n_Static_assert(NBDRIVER_ABI_VERSION == 1U, \"ABI version\");\n",
+      "stdout": "",
+      "stderr": "",
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "passed": true
+    },
+    {
+      "name": "missing KDIR diagnostic",
+      "command": [
+        "make",
+        "check-kdir"
+      ],
+      "stdin": null,
+      "stdout": "",
+      "stderr": "请指定 KDIR=/path/to/kernel/build\nmake: *** [Makefile:13: check-kdir] Error 1\n",
+      "exit_code": 2,
+      "expected_exit_code": 2,
+      "passed": true
+    }
+  ],
+  "kernel_build": "Not run: target kernel build directory is not specified.",
+  "device_validation": "Not run.",
+  "source_sha256": {
+    "src/Makefile": "34613e41d5c4d1cac042fd1aa379798aba3c37ee6fb0ac78cf35d85958909e03",
+    "src/entry.c": "dfee3c8f887d374b3dd79d3c3b1174c7d39e611794e66069abf14df311849374",
+    "src/memory.c": "fa1a19e036fb47c228abe93d6db985d1d023c1379e0945cf885612a658e036d6",
+    "src/memory.h": "3f4bef57320aa85b5d4e7b646ca97ae2f5cf38469a501fae2fe5a88c7db02a44",
+    "src/process.c": "73d732cfea070c96dbcdef4bef44727cbc7a19002839159a59688c9e9fc7a6d1",
+    "src/process.h": "447af6a9f4cd6f388c10b03335814c6f3408397b1456b4ff658a8fb591c89825",
+    "include/nbdriver_abi.h": "a002baae9d5807afdd920c4b272c19641b3e8d4e71bf1d478701cca5fba16d44"
+  }
+}

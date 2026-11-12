@@ -1,0 +1,19 @@
+# Kernel build products
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+*.d
+.tmp_versions/
+Module.symvers
+modules.order
+
+# Local build output
+/out/*
+!/out/.gitkeep
+/build/
+/sdk/build/
+.env
+.env.*
+!.env.example
