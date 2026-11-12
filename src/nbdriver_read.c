@@ -2,14 +2,13 @@
 #include <linux/capability.h>
 #include <linux/err.h>
 #include <linux/mm.h>
+#include <linux/memremap.h>
 #include <linux/pid.h>
 #include <linux/ptrace.h>
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/task.h>
 #include <linux/slab.h>
-#include <linux/version.h>
-#include <linux/highmem.h>
 #include <linux/uaccess.h>
 
 #include <asm/memory.h>
@@ -103,23 +102,21 @@ static int nbdriver_read_target(struct nbdriver_read_request *request, u8 *bytes
 		ret = nbdriver_walk_get_page(vma, at, &page);
 		if (ret)
 			break;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
 		{
-			void *mapped = kmap_local_page(page);
+			phys_addr_t physical = PFN_PHYS(page_to_pfn(page)) +
+				offset_in_page(at);
+			void *mapped = memremap(PFN_PHYS(page_to_pfn(page)),
+						PAGE_SIZE, MEMREMAP_WB);
 
+			if (!mapped) {
+				nbdriver_walk_put_page(page);
+				ret = -ENOMEM;
+				break;
+			}
 			memcpy(bytes + request->copied,
-			       (u8 *)mapped + offset_in_page(at), length);
-			kunmap_local(mapped);
+			       (u8 *)mapped + offset_in_page(physical), length);
+			memunmap(mapped);
 		}
-#else
-		{
-			void *mapped = kmap_atomic(page);
-
-			memcpy(bytes + request->copied,
-			       (u8 *)mapped + offset_in_page(at), length);
-			kunmap_atomic(mapped);
-		}
-#endif
 		nbdriver_walk_put_page(page);
 		request->copied += length;
 	}
