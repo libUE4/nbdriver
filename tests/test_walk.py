@@ -235,7 +235,7 @@ int main(void)
     reset(); leaf_pte.value = (flags(7) & ~PTE_ATTRINDX_MASK) | PTE_ATTRINDX(MT_NORMAL_TAGGED);
     expect(&vma, 0, 0, &pages[7]);
     reset(); leaf_pte.value = flags(0) | SPECIAL; pages[0].reserved = 1;
-    expect(&vma, 0, 0, &pages[0]);
+    expect(&vma, 0, -EOPNOTSUPP, NULL);
     reset(); root_pmd.value = flags(10);
     expect(&vma, 3 * PAGE_SIZE + 9, 0, &pages[13]);
     reset(); root_pud.value = flags(20);

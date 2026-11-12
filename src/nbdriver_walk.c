@@ -58,8 +58,7 @@ static int nbdriver_leaf_get(pte_t entry, unsigned long pfn, bool block,
 		return -EOPNOTSUPP;
 	if (nbdriver_pte_devmap(entry))
 		return -EOPNOTSUPP;
-	if (!block && pte_special(entry) &&
-	    pfn != page_to_pfn(ZERO_PAGE(0)))
+	if (!block && pte_special(entry))
 		return -EOPNOTSUPP;
 	if (!pfn_valid(pfn) || !virt_addr_valid(phys_to_virt(PFN_PHYS(pfn))))
 		return -EFAULT;
