@@ -42,22 +42,32 @@ jobs:
           - android15-6.6
           - android16-6.12
           - android17-6.18
-    container:
-      image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-20260828
     defaults:
       run:
         shell: bash
     env:
       KMI: ${{ matrix.kmi }}
     steps:
+      - name: Free runner disk before pulling DDK
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf -- /usr/share/dotnet /usr/local/lib/android \
+            /usr/local/.ghcup /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - name: Build ARM64 module
         run: |
           set -euo pipefail
-          make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}" \
-            ARCH=arm64 LLVM=1 LLVM_IAS=1
+          docker run --rm --entrypoint /bin/bash \
+            --mount "type=bind,source=${GITHUB_WORKSPACE},target=/work" \
+            --workdir /work \
+            "ghcr.io/ylarod/ddk:${KMI}-20260828" -euc '
+              make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}" \
+                ARCH=arm64 LLVM=1 LLVM_IAS=1
+            '
           test -s src/nbdriver.ko
       - name: Prepare module and hash
         run: |
