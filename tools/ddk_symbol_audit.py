@@ -11,7 +11,6 @@ import shutil
 import subprocess
 
 SYMBOLS = [
-    "misc_register", "misc_deregister",
     "anon_inode_getfile", "get_unused_fd_flags", "put_unused_fd", "fd_install",
     "fput", "task_work_add", "register_kprobe", "unregister_kprobe",
     "kallsyms_lookup_name", "sys_call_table", "__arm64_sys_ni_syscall",
