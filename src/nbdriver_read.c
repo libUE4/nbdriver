@@ -2,7 +2,6 @@
 #include <linux/capability.h>
 #include <linux/err.h>
 #include <linux/mm.h>
-#include <linux/memremap.h>
 #include <linux/pid.h>
 #include <linux/ptrace.h>
 #include <linux/sched.h>
@@ -21,11 +20,8 @@
 #include "nbdriver_walk.h"
 
 static __typeof__(&mm_access) nbdriver_mm_access;
-typedef void *(*nbdriver_memremap_fn_t)(resource_size_t offset,
-						 size_t size, unsigned long flags);
-typedef void (*nbdriver_memunmap_fn_t)(void *addr);
-static nbdriver_memremap_fn_t nbdriver_memremap;
-static nbdriver_memunmap_fn_t nbdriver_memunmap;
+typedef __typeof__(&access_remote_vm) nbdriver_access_remote_vm_fn_t;
+static nbdriver_access_remote_vm_fn_t nbdriver_access_remote_vm;
 
 static noinline struct mm_struct *NBDRIVER_NO_CFI
 nbdriver_access_mm(struct task_struct *task)
@@ -33,33 +29,19 @@ nbdriver_access_mm(struct task_struct *task)
 	return nbdriver_mm_access(task, PTRACE_MODE_READ_FSCREDS);
 }
 
-static noinline void *NBDRIVER_NO_CFI
-nbdriver_map_ram(u64 physical, size_t size)
-{
-	return nbdriver_memremap(physical, size, 1UL);
-}
-
-static noinline void NBDRIVER_NO_CFI
-nbdriver_unmap_ram(void *mapped)
-{
-	nbdriver_memunmap(mapped);
-}
-
 int nbdriver_read_init(void)
 {
 	nbdriver_mm_access = (__typeof__(nbdriver_mm_access))
 		nbdriver_ksym_lookup("mm_access");
-	nbdriver_memremap = (nbdriver_memremap_fn_t)
-		nbdriver_ksym_lookup("memremap");
-	nbdriver_memunmap = (nbdriver_memunmap_fn_t)
-		nbdriver_ksym_lookup("memunmap");
-	if (!nbdriver_mm_access) {
-		nbd_err("stage=read_init symbol=mm_access error=%d\n", -ENOENT);
+	nbdriver_access_remote_vm =
+		(nbdriver_access_remote_vm_fn_t)
+		nbdriver_ksym_lookup("access_remote_vm");
+	if (!nbdriver_access_remote_vm) {
+		nbd_err("stage=read_init symbol=access_remote_vm error=%d\n", -ENOENT);
 		return -ENOENT;
 	}
-	if (!nbdriver_memremap || !nbdriver_memunmap) {
-		nbd_err("stage=read_init symbols=memremap,memunmap error=%d\n",
-			-ENOENT);
+	if (!nbdriver_mm_access) {
+		nbd_err("stage=read_init symbol=mm_access error=%d\n", -ENOENT);
 		return -ENOENT;
 	}
 	return 0;
@@ -67,9 +49,8 @@ int nbdriver_read_init(void)
 
 void nbdriver_read_exit(void)
 {
+	nbdriver_access_remote_vm = NULL;
 	nbdriver_mm_access = NULL;
-	nbdriver_memremap = NULL;
-	nbdriver_memunmap = NULL;
 }
 
 static int nbdriver_read_target(struct nbdriver_read_request *request, u8 *bytes)
@@ -130,20 +111,15 @@ static int nbdriver_read_target(struct nbdriver_read_request *request, u8 *bytes
 		ret = nbdriver_walk_get_page(vma, at, &page);
 		if (ret)
 			break;
-		{
-			void *mapped = nbdriver_map_ram(
-				PFN_PHYS(page_to_pfn(page)), PAGE_SIZE);
-
-			if (!mapped) {
-				nbdriver_walk_put_page(page);
-				ret = -ENOMEM;
-				break;
-			}
-			memcpy(bytes + request->copied,
-			       (u8 *)mapped + offset_in_page(at), length);
-			nbdriver_unmap_ram(mapped);
-		}
 		nbdriver_walk_put_page(page);
+		ret = nbdriver_access_remote_vm(mm, at,
+					bytes + request->copied, length, 0);
+		if (ret != (int)length) {
+			if (ret >= 0)
+				ret = -EFAULT;
+			break;
+		}
+		ret = 0;
 		request->copied += length;
 	}
 	mmap_read_unlock(mm);

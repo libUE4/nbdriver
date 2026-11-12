@@ -4,6 +4,12 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      kmi:
+        description: '单个 KMI；留空或 all 编译全部'
+        required: false
+        default: all
+        type: string
 
 permissions:
   contents: read
@@ -50,15 +56,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kmi:
-          - android12-5.10
-          - android13-5.10
-          - android13-5.15
-          - android14-5.15
-          - android14-6.1
-          - android15-6.6
-          - android16-6.12
-          - android17-6.18
+        kmi: ${{ fromJSON(inputs.kmi == '' || inputs.kmi == 'all' && '["android12-5.10","android13-5.10","android13-5.15","android14-5.15","android14-6.1","android15-6.6","android16-6.12","android17-6.18"]' || format('["{0}"]', inputs.kmi)) }}
     defaults:
       run:
         shell: bash
