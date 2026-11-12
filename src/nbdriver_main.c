@@ -3,6 +3,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 
+#include "nbdriver_abi.h"
 #include "nbdriver_comm.h"
 
 static int __init nbdriver_init(void)
