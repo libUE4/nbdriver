@@ -2,6 +2,7 @@
 #include <linux/capability.h>
 #include <linux/err.h>
 #include <linux/mm.h>
+#include <linux/memremap.h>
 #include <linux/pid.h>
 #include <linux/ptrace.h>
 #include <linux/sched.h>
@@ -20,8 +21,8 @@
 #include "nbdriver_walk.h"
 
 static __typeof__(&mm_access) nbdriver_mm_access;
-typedef void *(*nbdriver_memremap_fn_t)(u64, size_t, unsigned long);
-typedef void (*nbdriver_memunmap_fn_t)(void *);
+typedef __typeof__(&memremap) nbdriver_memremap_fn_t;
+typedef __typeof__(&memunmap) nbdriver_memunmap_fn_t;
 static nbdriver_memremap_fn_t nbdriver_memremap;
 static nbdriver_memunmap_fn_t nbdriver_memunmap;
 
