@@ -8,8 +8,6 @@
 #include <linux/sched/mm.h>
 #include <linux/sched/task.h>
 #include <linux/slab.h>
-#include <linux/version.h>
-#include <linux/highmem.h>
 #include <linux/uaccess.h>
 
 #include <asm/memory.h>
@@ -22,6 +20,10 @@
 #include "nbdriver_walk.h"
 
 static __typeof__(&mm_access) nbdriver_mm_access;
+typedef void *(*nbdriver_memremap_fn_t)(u64, size_t, unsigned long);
+typedef void (*nbdriver_memunmap_fn_t)(void *);
+static nbdriver_memremap_fn_t nbdriver_memremap;
+static nbdriver_memunmap_fn_t nbdriver_memunmap;
 
 static noinline struct mm_struct *NBDRIVER_NO_CFI
 nbdriver_access_mm(struct task_struct *task)
@@ -29,12 +31,33 @@ nbdriver_access_mm(struct task_struct *task)
 	return nbdriver_mm_access(task, PTRACE_MODE_READ_FSCREDS);
 }
 
+static noinline void *NBDRIVER_NO_CFI
+nbdriver_map_ram(u64 physical, size_t size)
+{
+	return nbdriver_memremap(physical, size, 1UL);
+}
+
+static noinline void NBDRIVER_NO_CFI
+nbdriver_unmap_ram(void *mapped)
+{
+	nbdriver_memunmap(mapped);
+}
+
 int nbdriver_read_init(void)
 {
 	nbdriver_mm_access = (__typeof__(nbdriver_mm_access))
 		nbdriver_ksym_lookup("mm_access");
+	nbdriver_memremap = (nbdriver_memremap_fn_t)
+		nbdriver_ksym_lookup("memremap");
+	nbdriver_memunmap = (nbdriver_memunmap_fn_t)
+		nbdriver_ksym_lookup("memunmap");
 	if (!nbdriver_mm_access) {
 		nbd_err("stage=read_init symbol=mm_access error=%d\n", -ENOENT);
+		return -ENOENT;
+	}
+	if (!nbdriver_memremap || !nbdriver_memunmap) {
+		nbd_err("stage=read_init symbols=memremap,memunmap error=%d\n",
+			-ENOENT);
 		return -ENOENT;
 	}
 	return 0;
@@ -43,6 +66,8 @@ int nbdriver_read_init(void)
 void nbdriver_read_exit(void)
 {
 	nbdriver_mm_access = NULL;
+	nbdriver_memremap = NULL;
+	nbdriver_memunmap = NULL;
 }
 
 static int nbdriver_read_target(struct nbdriver_read_request *request, u8 *bytes)
@@ -103,23 +128,19 @@ static int nbdriver_read_target(struct nbdriver_read_request *request, u8 *bytes
 		ret = nbdriver_walk_get_page(vma, at, &page);
 		if (ret)
 			break;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
 		{
-			void *mapped = kmap_local_page(page);
+			void *mapped = nbdriver_map_ram(
+				PFN_PHYS(page_to_pfn(page)), PAGE_SIZE);
 
+			if (!mapped) {
+				nbdriver_walk_put_page(page);
+				ret = -ENOMEM;
+				break;
+			}
 			memcpy(bytes + request->copied,
 			       (u8 *)mapped + offset_in_page(at), length);
-			kunmap_local(mapped);
+			nbdriver_unmap_ram(mapped);
 		}
-#else
-		{
-			void *mapped = kmap_atomic(page);
-
-			memcpy(bytes + request->copied,
-			       (u8 *)mapped + offset_in_page(at), length);
-			kunmap_atomic(mapped);
-		}
-#endif
 		nbdriver_walk_put_page(page);
 		request->copied += length;
 	}
