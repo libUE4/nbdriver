@@ -103,7 +103,7 @@ static int nbdriver_read_target(struct nbdriver_read_request *request, u8 *bytes
 			break;
 		memcpy(bytes + request->copied,
 		       (u8 *)page_address(page) + offset_in_page(at), length);
-		put_page(page);
+		nbdriver_walk_put_page(page);
 		request->copied += length;
 	}
 	mmap_read_unlock(mm);

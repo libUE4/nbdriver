@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/errno.h>
+#include <linux/version.h>
 #include <linux/mm.h>
 #include <linux/pgtable.h>
 #include <linux/spinlock.h>
@@ -8,6 +9,36 @@
 #include <asm/pgtable.h>
 
 #include "nbdriver_walk.h"
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+#define nbdriver_pud_devmap(entry) false
+#define nbdriver_pmd_devmap(entry) false
+#define nbdriver_pte_devmap(entry) false
+#else
+#define nbdriver_pud_devmap(entry) pud_devmap(entry)
+#define nbdriver_pmd_devmap(entry) pmd_devmap(entry)
+#define nbdriver_pte_devmap(entry) pte_devmap(entry)
+#endif
+
+static bool nbdriver_page_ref_get(struct page *page)
+{
+	struct page *head = compound_head(page);
+
+	return get_page_unless_zero(head);
+}
+
+void nbdriver_walk_put_page(struct page *page)
+{
+	struct page *head = compound_head(page);
+
+	if (!page_ref_dec_and_test(head))
+		return;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+	__folio_put(page_folio(head));
+#else
+	__put_page(head);
+#endif
+}
 
 static int nbdriver_leaf_get(pte_t entry, unsigned long pfn, bool block,
 			     struct page **result)
@@ -25,7 +56,7 @@ static int nbdriver_leaf_get(pte_t entry, unsigned long pfn, bool block,
 #endif
 	    )
 		return -EOPNOTSUPP;
-	if (pte_devmap(entry))
+	if (nbdriver_pte_devmap(entry))
 		return -EOPNOTSUPP;
 	if (!block && pte_special(entry) &&
 	    pfn != page_to_pfn(ZERO_PAGE(0)))
@@ -38,7 +69,8 @@ static int nbdriver_leaf_get(pte_t entry, unsigned long pfn, bool block,
 	if (page != ZERO_PAGE(0) && (PageReserved(head) || PageSlab(head)))
 		return -EOPNOTSUPP;
 	/* The leaf lock keeps the mapping's page reference alive during get_page. */
-	get_page(page);
+	if (!nbdriver_page_ref_get(page))
+		return -EAGAIN;
 	*result = page;
 	return 0;
 }
@@ -79,7 +111,7 @@ int nbdriver_walk_get_page(struct vm_area_struct *vma, unsigned long address,
 		return -ENODATA;
 	}
 	if (pud_leaf(pud)) {
-		if (pud_devmap(pud)) {
+		if (nbdriver_pud_devmap(pud)) {
 			spin_unlock(ptl);
 			return -EOPNOTSUPP;
 		}
@@ -104,7 +136,7 @@ int nbdriver_walk_get_page(struct vm_area_struct *vma, unsigned long address,
 			return -ENODATA;
 		}
 		if (pmd_leaf(pmd)) {
-			if (pmd_devmap(pmd)) {
+			if (nbdriver_pmd_devmap(pmd)) {
 				spin_unlock(ptl);
 				return -EOPNOTSUPP;
 			}

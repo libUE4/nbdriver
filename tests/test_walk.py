@@ -153,12 +153,22 @@ static void pte_unmap_unlock(pte_t *pte, spinlock_t *ptl)
     (void)pte;
     spin_unlock(ptl);
 }
-static void get_page(struct page *page)
+static bool get_page_unless_zero(struct page *page)
 {
-    assert(locks == 1);
-    compound_head(page)->refs++;
+    if (!page->refs)
+        return false;
+    page->refs++;
     gets++;
+    return true;
 }
+static bool page_ref_dec_and_test(struct page *page)
+{
+    assert(page->refs > 0);
+    return --page->refs == 0;
+}
+static struct page *page_folio(struct page *page) { return page; }
+static void __folio_put(struct page *page) { (void)page; }
+static void __attribute__((unused)) __put_page(struct page *page) { (void)page; }
 #endif
 """
 
