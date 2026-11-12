@@ -7,13 +7,10 @@
 
 #include "nbdriver_ksym.h"
 #include "nbdriver_log.h"
+#include "nbdriver_cfi.h"
 
 #ifndef KSYM_NAME_LEN
 #define KSYM_NAME_LEN 128
-#endif
-
-#ifndef __nocfi
-#define __nocfi
 #endif
 
 typedef unsigned long (*nbdriver_lookup_fn_t)(const char *name);
@@ -56,7 +53,7 @@ void nbdriver_ksym_exit(void)
 	nbdriver_lookup_fn = NULL;
 }
 
-unsigned long __nocfi nbdriver_ksym_lookup(const char *name)
+noinline unsigned long NBDRIVER_NO_CFI nbdriver_ksym_lookup(const char *name)
 {
 	unsigned long address;
 

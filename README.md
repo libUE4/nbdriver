@@ -4,6 +4,10 @@
 
 当前通信入口改为匿名 FD + ioctl：reboot kprobe 只排入 task_work，FD 安装在任务上下文完成。此次改动尚未完成远程构建或设备复测；业务功能仍未迁移。
 
+本轮已按工作区 lsdriver 接入 CFI/KCFI 兼容层，并修正 task_work
+动态函数指针类型。崩溃证据、迁移范围与验证限制见
+[CFI/KCFI 迁移记录](docs/cfi-port-20261112.md)。
+
 ```text
 nbdriver/
 ├── Makefile                 # 内核模块构建入口

@@ -15,6 +15,7 @@
 #include "nbdriver_entry.h"
 #include "nbdriver_log.h"
 #include "nbdriver_ksym.h"
+#include "nbdriver_cfi.h"
 
 /*
  * pre_handler 运行在探测上下文，禁止睡眠，不能在其中建 FD。
@@ -24,15 +25,12 @@
 /*
  * task_work_add 在 5.10/5.15/6.1/6.6 的 Module.symvers 中未导出，
  * 静态引用会在 .ko 里留下未定义符号，insmod 直接失败。
- * 因此只保留函数指针，通过 kallsyms 运行时解析；签名六版一致：
- *   int task_work_add(struct task_struct *, struct callback_head *, enum mode)
+ * 因此只保留函数指针，通过 kallsyms 运行时解析。
+ * 必须使用目标内核声明的完整类型：将枚举参数写为 int 虽然宽度相同，
+ * 在 KCFI 下却有不同的类型哈希，会在间接调用前触发 BRK 并 panic。
+ * typeof 只用于获取类型，不产生对未导出 task_work_add 的静态引用。
  */
-typedef int (*nbdriver_task_work_add_fn_t)(struct task_struct *task,
-					   struct callback_head *work,
-					   int mode);
-
-/* 已核对 5.10/5.15/6.1/6.6/6.12/6.18 六版侧值均为：NONE=0, RESUME=1, SIGNAL=2。 */
-#define NBDRIVER_TWA_RESUME 1
+typedef __typeof__(&task_work_add) nbdriver_task_work_add_fn_t;
 
 struct nbdriver_fd_work {
 	struct callback_head callback;
@@ -42,6 +40,13 @@ struct nbdriver_fd_work {
 static struct kprobe nbdriver_probe;
 static const char *nbdriver_probe_symbol;
 static nbdriver_task_work_add_fn_t nbdriver_task_work_add_fn;
+
+/* lsdriver-style exemption only at the dynamically resolved API call. */
+static noinline int NBDRIVER_NO_CFI
+nbdriver_queue_task_work(struct task_struct *task, struct callback_head *work)
+{
+	return nbdriver_task_work_add_fn(task, work, TWA_RESUME);
+}
 
 static void nbdriver_fd_work_fn(struct callback_head *head)
 {
@@ -85,8 +90,7 @@ static int nbdriver_schedule_fd(int __user *output_fd)
 	work->output_fd = output_fd;
 	init_task_work(&work->callback, nbdriver_fd_work_fn);
 
-	ret = nbdriver_task_work_add_fn(current, &work->callback,
-					NBDRIVER_TWA_RESUME);
+	ret = nbdriver_queue_task_work(current, &work->callback);
 	if (ret) {
 		nbd_err("stage=fd_schedule operation=task_work_add error=%d\n", ret);
 		module_put(THIS_MODULE);
@@ -102,9 +106,9 @@ static int nbdriver_schedule_fd(int __user *output_fd)
  * 实参在 syscall_regs->regs[0..5]；见 arch/arm64/include/asm/syscall_wrapper.h
  * 的 SC_ARM64_REGS_TO_ARGS。
  *
- * 权限检查必须放到 task_work 回调里做。这里运行在 brk_handler 异常上下文，
- * current_euid() 展开为 mrs SP_EL0 + 访问 task_struct->cred 的固定偏移，
- * 该偏移在不同内核配置下不同，偏移错就是野指针，异常里再异常直接 panic。
+ * 权限检查留在 task_work 回调，保持探针处理路径最小。
+ * 本次 pstore 与原件反汇编对应的是 task_work_add 的 KCFI 类型检查陷阱，
+ * 不能据此将崩溃归因于 current_euid()；task_struct 布局仍需匹配目标内核。
  */
 static int nbdriver_reboot_pre(struct kprobe *probe, struct pt_regs *regs)
 {
