@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/errno.h>
+#include <linux/cred.h>
 #include <linux/kprobes.h>
 #include <linux/module.h>
 #include <linux/sched.h>
@@ -34,7 +35,7 @@ static void nbdriver_install_fd_work(struct callback_head *head)
 	module_put(THIS_MODULE);
 }
 
-static int nbdriver_schedule_fd_install(struct pt_regs *syscall_regs)
+static int nbdriver_schedule_fd_install(const struct pt_regs *syscall_regs)
 {
 	struct nbdriver_fd_task_work *work;
 	int ret;
@@ -67,13 +68,15 @@ static int nbdriver_reboot_wrapper_pre(struct kprobe *probe,
 	int ret;
 
 	(void)probe;
+	if (!uid_eq(current_euid(), GLOBAL_ROOT_UID))
+		return 0;
 	syscall_regs = (const struct pt_regs *)(unsigned long)regs->regs[0];
 	if (!syscall_regs ||
 	    (u32)syscall_regs->regs[0] != NBDRIVER_INSTALL_MAGIC1 ||
 	    (u32)syscall_regs->regs[1] != NBDRIVER_INSTALL_MAGIC2)
 		return 0;
 
-	ret = nbdriver_schedule_fd_install((struct pt_regs *)syscall_regs);
+	ret = nbdriver_schedule_fd_install(syscall_regs);
 	if (ret)
 		pr_warn("nbdriver: stage=reboot_probe schedule=task_work_add error=%d\n", ret);
 	return 0;
@@ -85,6 +88,8 @@ static int nbdriver_reboot_se_pre(struct kprobe *probe, struct pt_regs *regs)
 	int ret;
 
 	(void)probe;
+	if (!uid_eq(current_euid(), GLOBAL_ROOT_UID))
+		return 0;
 	if ((u32)regs->regs[0] != NBDRIVER_INSTALL_MAGIC1 ||
 	    (u32)regs->regs[1] != NBDRIVER_INSTALL_MAGIC2)
 		return 0;

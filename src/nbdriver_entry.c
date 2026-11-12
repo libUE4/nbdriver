@@ -4,9 +4,6 @@
 
 #include "nbdriver_entry.h"
 
-int nbdriver_reboot_entry_init(void);
-void nbdriver_reboot_entry_exit(void);
-
 int nbdriver_entry_init(void)
 {
 	int ret;

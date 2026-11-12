@@ -7,7 +7,7 @@
 | 项目 | 获取 FD | 回调中的处理 | 额外内核依赖 | 主要问题 |
 |---|---|---|---|---|
 | enkernel | 扫描并改写 `sys_call_table` 的未实现槽位；另注册 reboot kprobe 作为 fallback | reboot kprobe 仅分配 `GFP_ATOMIC` work 并排入 `task_work`；FD 分配和用户拷贝延迟到 task_work | kallsyms resolver、sys_call_table、stop_machine/fixmap 写入路径、kprobe、task_work | 双路径依赖较多非稳定内核内部接口；syscall table 不是模块 ABI。其 kprobe fallback 的调用上下文处理比 LinyuKernel 当前实现稳妥 |
-| LinyuKernel | reboot kprobe | 在 kprobe pre-handler 直接分配 FD、创建 anon inode、安装 FD 并改写 PC | kprobe、anon inode/FD helper、reboot wrapper 布局 | 对 `__arm64_sys_reboot` 探针时 `regs->regs[0]` 是 wrapper 收到的寄存器结构指针；当前 handler 却直接拿它作为 magic。并且 pre-handler 内执行可能睡眠的分配和用户拷贝 |
+| LinyuKernel | reboot kprobe | 在 kprobe pre-handler 直接分配 FD、创建 anon inode、安装 FD 并改写 PC | kprobe、anon inode/FD helper、reboot wrapper 布局 | 对 `__arm64_sys_reboot` 探针时 `regs->regs[0]` 是 wrapper 收到的寄存器结构指针；当前 handler 却直接拿它作为 magic。并且 pre-handler 内执行可能睡眠的文件/FD 分配 |
 | nbdriver 当前选择 | reboot kprobe 作为握手入口，SDK 仍以 ioctl 操作 anon FD | 只在 pre-handler 解码 magic 并排入 `task_work`；任务回调才分配 FD 和回写用户内存 | kprobe、task_work、anon inode/FD helpers | 避开 syscall table 改写，但仍依赖内核探针、wrapper ABI 与具体 KMI 导出；必须按目标 DDK 编译和实机测试 |
 
 证据位置：enkernel `main.c` 约 136–229 行和 `syscall.c` 约 187–260 行；LinyuKernel `LingYuKernel/src/entry.c` 约 94–127 行；当前实现位于 `src/nbdriver_entry_reboot.c` 和 `src/nbdriver_comm.c`。
