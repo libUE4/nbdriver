@@ -44,7 +44,7 @@ nbdriver/
 
 GitHub Actions 的 5.10、5.15、6.1、6.6、6.12、6.18 六个 KMI 构建和 SDK/ABI 检查均已通过：[运行记录](https://github.com/libUE4/nbdriver/actions/runs/43186897551)。具体构建源码、vermagic、哈希和限制见 [远程编译记录](docs/remote-build.md)。构建通过不等于目标设备已验证。
 
-针对后续 `nbdriver_reboot_pre` 崩溃的 CFI 修复与独立分支的 8 KMI 远程编译记录见 [CFI 迁移与验证](docs/cfi-port-20261112.md)。这批新模块尚未在目标设备加载验证。
+针对后续 `nbdriver_reboot_pre` 崩溃的 CFI 修复、8 KMI 远程编译和 6.6 实机通信验证见 [CFI 迁移与验证](docs/cfi-port-20261112.md)。其余 KMI 的新模块尚未在目标设备验证。
 
 之前 misc 版本在 PKR110 6.6.30 的验证记录见 [设备验证记录](docs/device-6.6.md)，只作为历史基线；本轮入口切换后需重新远程构建和复测。
 
