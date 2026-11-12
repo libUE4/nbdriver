@@ -20,6 +20,8 @@ STUBS = r"""
 #include <string.h>
 
 typedef unsigned char u8;
+#define KERNEL_VERSION(a, b, c) (((a) << 16) + ((b) << 8) + (c))
+#define LINUX_VERSION_CODE KERNEL_VERSION(6, 6, 0)
 typedef struct { unsigned long value; } entry_t;
 typedef entry_t pgd_t;
 typedef entry_t p4d_t;
@@ -253,6 +255,7 @@ with tempfile.TemporaryDirectory(prefix="nbdriver-walk-") as temporary:
     (root / "mock.h").write_text(STUBS)
     for header in ("linux/errno.h", "linux/mm.h", "linux/pgtable.h",
                    "linux/rcupdate.h", "linux/spinlock.h", "linux/mm_types.h",
+                   "linux/version.h",
                    "asm/memory.h", "asm/pgtable.h"):
         path = root / header
         path.parent.mkdir(parents=True, exist_ok=True)
