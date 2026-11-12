@@ -258,5 +258,10 @@ with tempfile.TemporaryDirectory(prefix="nbdriver-walk-") as temporary:
                         "-Wno-unused-parameter", f"-DTEST_PAGE_SHIFT={shift}",
                         "-I", str(root), "-I", str(PROJECT / "src"),
                         str(harness), "-o", str(binary)], check=True)
-        subprocess.run([str(binary)], check=True)
+        result = subprocess.run([str(binary)], capture_output=True, text=True)
+        if result.returncode:
+            print(f"walker failed: PAGE_SHIFT={shift} rc={result.returncode}")
+            print(result.stdout, end="")
+            print(result.stderr, end="")
+            raise SystemExit(result.returncode)
 print("Synthetic walker tests passed; real kernel locking/ABI still needs kernel testing.")
