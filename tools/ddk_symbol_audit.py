@@ -56,7 +56,8 @@ def main():
         "limits": "DDK evidence only; source occurrence or exported symbol does not prove vendor availability or runtime probe success.",
         "symvers": [], "system_maps": [], "configs": [], "source": [], "commands": [],
     }
-    roots = list(dict.fromkeys([root, root / "source", root / "build", root.parent / "common"]))
+    ddk_root = Path(os.environ.get("DDK_ROOT", "/opt/ddk"))
+    roots = list(dict.fromkeys([root, root / "source", root / "build", root.parent / "common", ddk_root / "src" / root.name]))
     for directory in roots:
         for name in ("Module.symvers", "System.map", ".config"):
             path = directory / name
