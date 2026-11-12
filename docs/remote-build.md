@@ -17,6 +17,6 @@ GitHub Actions：[43186897551](https://github.com/libUE4/nbdriver/actions/runs/4
 
 修复过两类真实问题：主模块缺少 ABI 头文件已补齐；6.18 镜像展开耗尽 runner 磁盘，已改为清理临时 runner 的无用预装 SDK 后运行容器，并恢复输出文件归 runner 所有。原始失败 annotation 见 [runner-disk-failure.json](validation/runner-disk-failure.json)。
 
-编译通过仅覆盖本次六个明确列出的 DDK 目标。QEMU 和真机模块加载、权限及 ioctl 往返仍未验证。当前连接设备为厂商 `6.6.30`，与 6.6 DDK 产物 vermagic 不同，不能直接视为适用。
+编译通过仅覆盖本次六个明确列出的 DDK 目标。后续在当前 PKR110 厂商 `6.6.30` 设备上，使用原始 6.6 产物通过普通 insmod 加载和 ioctl/卸载/重新加载验证，见 [设备验证记录](device-6.6.md)。版本字符串不同被该设备接受的原因未调查，不据此外推。QEMU 及其余目标设备运行仍未验证。
 
 重构前 14 个文件的备份位于 `/root/workspace/.aicode/nbdriver/compat-audit-before-20261112`，带 `sha256.json`。恢复检查应复制该目录到独立目录并核验哈希，保留当前产物；不用将新模块产物覆盖原驱动。

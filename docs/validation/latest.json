@@ -296,6 +296,7 @@
   "host_checks_record": "docs/validation/host-before-remote.json",
   "earlier_failure_record": "docs/validation/runner-disk-failure.json",
   "qemu_runtime": "not run",
-  "device_module_load_and_ioctl": "not run",
-  "device_compatibility_note": "Connected vendor device reports 6.6.30; the android15-6.6 module vermagic is 6.6.127-4k-g46a034eca005-dirty. DDK build success does not establish load or runtime compatibility on this device."
+  "device_module_load_and_ioctl": "passed on the connected PKR110 vendor 6.6.30 kernel; unload/reload verified; module left loaded",
+  "device_compatibility_note": "The exact unmodified android15-6.6 artifact (vermagic 6.6.127-4k-g46a034eca005-dirty) loaded with ordinary insmod on the connected PKR110 vendor 6.6.30 kernel. ABI=2,size=16,features=0; errors and unload/reload verified. Loader acceptance reason is not inferred, and results do not generalize to other devices.",
+  "device_validation_record": "docs/validation/device-6.6-20261112.json"
 }

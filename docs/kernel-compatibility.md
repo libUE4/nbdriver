@@ -17,7 +17,7 @@ misc 字符设备减少了对 syscall 内部实现的依赖，但它**不自动�
 | `android12-5.10` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
 | `android13-5.15` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
 | `android14-6.1` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
-| `android15-6.6` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
+| `android15-6.6` | 远程 DDK 构建通过；原件在当前 PKR110 厂商 6.6.30 上通过加载、ABI/错误返回及卸载/重新加载 | 该设备通信验证通过；其他设备未验证 |
 | `android16-6.12` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
 | `android17-6.18` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
 
@@ -45,8 +45,8 @@ misc 字符设备减少了对 syscall 内部实现的依赖，但它**不自动�
 - 设备 config 可读，观察到 `CONFIG_MODULES=y`、`CONFIG_MODVERSIONS=y`、`CONFIG_MODULE_SIG=y`、`CONFIG_KPROBES=y`、`CONFIG_KALLSYMS=y`、`CONFIG_IKHEADERS=m`；未观察到 `CONFIG_MODULE_SIG_FORCE=y`。这不证明该设备接受任意模块，也不等于 DDK 或符号版本表已经取得。
 - 构建容器、QEMU ARM64 system binary 和目标 `Module.symvers` 当前未在宿主可用环境中发现。
 - 本次改用 GitHub Actions 远程 DDK 构建，六个目标全部完成编译并下载核验；宿主无需本地 DDK。6.18 初始化时出现过 runner 磁盘不足，已修复并重跑成功，详见验证记录。
-- 没有在设备加载本模块，也没有进行 ioctl 往返。真机集成状态为未验证。
-- `android15-6.6` 产物的 vermagic 为 `6.6.127-4k-g46a034eca005-dirty`，不同于当前设备的 `6.6.30`；不能直接将该产物标记为当前设备适配完成。
+- 当前 PKR110 设备已通过普通 insmod 加载原产物，并完成实际 ioctl、错误返回、连续 FD 打开关闭、卸载和重新加载验证。当前保持加载；没有改 boot、分区或开机加载配置。详见 [设备验证记录](device-6.6.md)。
+- `android15-6.6` 产物的 vermagic 为 `6.6.127-4k-g46a034eca005-dirty`，不同于设备的 `6.6.30`；本次未修改模块或请求强制加载，设备仍接受该原件。未调查该厂商内核接受不同版本字符串的原因，不据此外推其他设备或所有 6.6 补丁版本兼容。
 
 ## 依据与限制
 
@@ -56,4 +56,4 @@ misc 字符设备减少了对 syscall 内部实现的依赖，但它**不自动�
 - [Linux 6.6 外部模块构建文档](https://kernel.org/doc/html/v6.6/kbuild/modules.html)：外部模块需匹配目标内核构建；`modules_prepare` 本身不会生成启用 MODVERSIONS 所需的 `Module.symvers`。
 - [Android common `android13-5.10` generic ABI 符号列表](https://android.googlesource.com/kernel/common/+/refs/heads/android13-5.10/android/abi_gki_aarch64_generic)：该特定列表明确包含 misc 注册/注销符号；不能泛化为所有分支。
 
-更细的实际命令、编译输出和设备事实见 `docs/validation/latest.json` 及 `docs/validation/host-before-remote.json`。不完整的目标符号清单不在这里推断为存在或缺失；设备侧加载和调用验证仍是后续必需项。
+更细的实际命令、编译输出和设备事实见 `docs/validation/latest.json`、`docs/validation/device-6.6-20261112.json` 及 `docs/validation/host-before-remote.json`。不完整的目标符号清单不在这里推断为存在或缺失；其余目标的设备侧加载和调用验证仍是后续必需项。
