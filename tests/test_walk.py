@@ -189,19 +189,27 @@ static void reset(void)
     locks = pte_locks = gets = mutation = 0;
     direct_valid = true;
 }
+static unsigned int case_no;
 static void expect(struct vm_area_struct *vma, unsigned long address,
                    int error, struct page *expected)
 {
     struct page *result = (void *)1;
-    int ret = nbdriver_walk_get_page(vma, address, &result);
-    assert(ret == error);
-    assert(result == expected);
-    assert(!locks);
-    assert(gets == (expected != NULL));
-    if (expected) assert(compound_head(expected)->refs == 2);
+    int ret;
+    ++case_no;
+    fprintf(stderr, "WALK_CASE=%u expected=%d\n", case_no, error);
+    ret = nbdriver_walk_get_page(vma, address, &result);
+    if (ret != error || result != expected || locks || gets != (expected != NULL) ||
+        (expected && compound_head(expected)->refs != 2)) {
+        fprintf(stderr, "WALK_FAIL case=%u got=%d result=%p expected_result=%p locks=%d gets=%d refs=%d\n",
+                case_no, ret, (void *)result, (void *)expected, locks, gets,
+                expected ? compound_head(expected)->refs : -1);
+        abort();
+    }
 }
 int main(void)
 {
+    setbuf(stdout, NULL);
+    setbuf(stderr, NULL);
     struct mm_struct mm = { 0 };
     struct vm_area_struct vma = { &mm };
 
