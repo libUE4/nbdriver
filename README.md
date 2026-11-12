@@ -2,7 +2,7 @@
 
 面向 ARM64 Android 内核的驱动重写工程。
 
-当前通信入口改为匿名 FD + ioctl：reboot kprobe 只排入 task_work，FD 安装在任务上下文完成。此次改动尚未完成远程构建或设备复测；业务功能仍未迁移。
+当前通信入口改为匿名 FD + ioctl：reboot kprobe 只排入 task_work，FD 安装在任务上下文完成。当前 6.6 版本已远程编译并在 PKR110 实机通过加载和 ABI 通信测试；业务功能仍未迁移。
 
 本轮已按工作区 lsdriver 接入 CFI/KCFI 兼容层，并修正 task_work
 动态函数指针类型。崩溃证据、迁移范围与验证限制见
@@ -46,7 +46,9 @@ GitHub Actions 的 5.10、5.15、6.1、6.6、6.12、6.18 六个 KMI 构建和 SD
 
 针对后续 `nbdriver_reboot_pre` 崩溃的 CFI 修复、8 KMI 远程编译和 6.6 实机通信验证见 [CFI 迁移与验证](docs/cfi-port-20261112.md)。其余 KMI 的新模块尚未在目标设备验证。
 
-之前 misc 版本在 PKR110 6.6.30 的验证记录见 [设备验证记录](docs/device-6.6.md)，只作为历史基线；本轮入口切换后需重新远程构建和复测。
+之前 misc 版本在 PKR110 6.6.30 的验证记录见 [设备验证记录](docs/device-6.6.md)，只作为历史基线；reboot 入口版本的结果见本轮 [CFI 迁移与验证](docs/cfi-port-20261112.md)。
+
+当前代码的逐函数覆盖、实机验证与其他 KMI 的刷入风险见 [函数与加载审计](docs/audit-functions-and-loading-20261112.md)。
 
 SDK 目前只封装打开设备与查询 ABI；业务模块、调用示例和设备回归测试尚未迁移。
 
