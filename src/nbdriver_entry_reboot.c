@@ -49,10 +49,17 @@ static void nbdriver_fd_work_fn(struct callback_head *head)
 		container_of(head, struct nbdriver_fd_work, callback);
 	int ret;
 
+	/* 这里已经是正常进程上下文，current 可信，可以做权限检查。 */
+	if (!uid_eq(current_euid(), GLOBAL_ROOT_UID)) {
+		nbd_warn("stage=fd_work reason=not_root error=%d\n", -EPERM);
+		goto out;
+	}
+
 	ret = nbdriver_comm_install_fd(work->output_fd);
 	if (ret)
 		nbd_err("stage=fd_work operation=install_fd error=%d\n", ret);
 
+out:
 	kfree(work);
 	module_put(THIS_MODULE);
 }
@@ -94,6 +101,10 @@ static int nbdriver_schedule_fd(int __user *output_fd)
  * __arm64_sys_reboot 由 SYSCALL_DEFINE 生成，形参是 const struct pt_regs *，
  * 实参在 syscall_regs->regs[0..5]；见 arch/arm64/include/asm/syscall_wrapper.h
  * 的 SC_ARM64_REGS_TO_ARGS。
+ *
+ * 权限检查必须放到 task_work 回调里做。这里运行在 brk_handler 异常上下文，
+ * current_euid() 展开为 mrs SP_EL0 + 访问 task_struct->cred 的固定偏移，
+ * 该偏移在不同内核配置下不同，偏移错就是野指针，异常里再异常直接 panic。
  */
 static int nbdriver_reboot_pre(struct kprobe *probe, struct pt_regs *regs)
 {
@@ -101,10 +112,6 @@ static int nbdriver_reboot_pre(struct kprobe *probe, struct pt_regs *regs)
 	int ret;
 
 	(void)probe;
-
-	/* reboot 属敏感路径，仅允许 root 触发。 */
-	if (!uid_eq(current_euid(), GLOBAL_ROOT_UID))
-		return 0;
 
 	syscall_regs = (const struct pt_regs *)(unsigned long)regs->regs[0];
 	if (!syscall_regs)
