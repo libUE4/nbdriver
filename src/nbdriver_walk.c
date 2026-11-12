@@ -60,12 +60,17 @@ static int nbdriver_leaf_get(pte_t entry, unsigned long pfn, bool block,
 		return -EOPNOTSUPP;
 	if (!block && pte_special(entry))
 		return -EOPNOTSUPP;
-	if (!pfn_valid(pfn) || !virt_addr_valid(phys_to_virt(PFN_PHYS(pfn))))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+	if (!pfn_is_map_memory(pfn))
 		return -EFAULT;
+#else
+	if (!pfn_valid(pfn))
+		return -EFAULT;
+#endif
 
 	page = pfn_to_page(pfn);
 	head = compound_head(page);
-	if (page != ZERO_PAGE(0) && (PageReserved(head) || PageSlab(head)))
+	if (PageReserved(head) || PageSlab(head))
 		return -EOPNOTSUPP;
 	/* The leaf lock keeps the mapping's page reference alive during get_page. */
 	if (!nbdriver_page_ref_get(page))

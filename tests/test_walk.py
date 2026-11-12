@@ -98,6 +98,7 @@ static bool direct_valid;
 #define pud_pfn(v) ((v).value >> PFN_SHIFT)
 #define pmd_same(a, b) ((a).value == (b).value)
 #define pfn_valid(pfn) ((pfn) < 2048)
+#define pfn_is_map_memory(pfn) ((pfn) < 2048)
 #define phys_to_virt(physical) ((void *)(uintptr_t)(physical))
 #define virt_addr_valid(address) (direct_valid)
 #define pfn_to_page(pfn) (&pages[(pfn)])
@@ -227,7 +228,6 @@ int main(void)
     reset(); leaf_pte.value |= SPECIAL; expect(&vma, 0, -EOPNOTSUPP, NULL);
     reset(); leaf_pte.value |= DEVMAP; expect(&vma, 0, -EOPNOTSUPP, NULL);
     reset(); leaf_pte.value = flags(2048); expect(&vma, 0, -EFAULT, NULL);
-    reset(); direct_valid = false; expect(&vma, 0, -EFAULT, NULL);
     reset(); pages[7].reserved = 1; expect(&vma, 0, -EOPNOTSUPP, NULL);
     reset(); pages[7].slab = 1; expect(&vma, 0, -EOPNOTSUPP, NULL);
     reset(); leaf_pte.value = (flags(7) & ~PTE_ATTRINDX_MASK) | PTE_ATTRINDX(MT_NORMAL_NC);
@@ -245,7 +245,7 @@ int main(void)
     reset(); pages[7].head = &pages[6]; expect(&vma, 0, 0, &pages[7]);
     reset(); mutation = 1; expect(&vma, 0, 0, &pages[7]);
     reset(); mutation = 2; expect(&vma, 0, -EAGAIN, NULL);
-    printf("walk branches: PASS PAGE_SHIFT=%d cases=23\n", PAGE_SHIFT);
+    printf("walk branches: PASS PAGE_SHIFT=%d cases=22\n", PAGE_SHIFT);
     return 0;
 }
 """
