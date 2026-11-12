@@ -68,6 +68,7 @@ jobs:
               make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}" \
                 ARCH=arm64 LLVM=1 LLVM_IAS=1
             '
+          sudo chown -R -- "$(id -u):$(id -g)" src out
           test -s src/nbdriver.ko
       - name: Prepare module and hash
         run: |
