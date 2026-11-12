@@ -2,6 +2,8 @@
 obj-m := nbdriver.o
 nbdriver-y := nbdriver_main.o \
 	      nbdriver_comm.o \
+	      nbdriver_read.o \
+	      nbdriver_walk.o \
 	      nbdriver_entry.o \
 	      nbdriver_entry_reboot.o \
 	      nbdriver_ksym.o \

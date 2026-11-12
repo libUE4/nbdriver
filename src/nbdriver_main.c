@@ -9,6 +9,7 @@
 #include "nbdriver_ksym.h"
 #include "nbdriver_log.h"
 #include "nbdriver_cfi.h"
+#include "nbdriver_read.h"
 
 static int __init nbdriver_init(void)
 {
@@ -32,16 +33,24 @@ static int __init nbdriver_init(void)
 		goto err_ksym;
 	}
 
+	ret = nbdriver_read_init();
+	if (ret) {
+		nbd_err("stage=module_init dependency=read error=%d\n", ret);
+		goto err_cfi;
+	}
+
 	ret = nbdriver_entry_init();
 	if (ret) {
 		nbd_err("stage=module_init dependency=entry error=%d\n", ret);
-		goto err_cfi;
+		goto err_read;
 	}
 
 	nbd_info("stage=module_init status=loaded abi=%u entry=%s\n",
 		 NBDRIVER_ABI_VERSION, nbdriver_entry_target());
 	return 0;
 
+err_read:
+	nbdriver_read_exit();
 err_cfi:
 	nbdriver_cfi_exit();
 err_ksym:
@@ -54,6 +63,7 @@ err_comm:
 static void __exit nbdriver_exit(void)
 {
 	nbdriver_entry_exit();
+	nbdriver_read_exit();
 	nbdriver_cfi_exit();
 	nbdriver_ksym_exit();
 	nbdriver_comm_exit();

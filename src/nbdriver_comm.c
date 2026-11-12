@@ -10,6 +10,7 @@
 #include "nbdriver_abi.h"
 #include "nbdriver_comm.h"
 #include "nbdriver_log.h"
+#include "nbdriver_read.h"
 
 /*
  * 这一层只依赖全系 EXPORT_SYMBOL(_GPL) 的接口：
@@ -23,13 +24,15 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 	struct nbdriver_abi_info info = {
 		.version = NBDRIVER_ABI_VERSION,
 		.size = sizeof(info),
-		.features = 0,
+		.features = NBDRIVER_FEATURE_READ_PROCESS,
 		.reserved = 0,
 	};
 
 	(void)file;
 
 	switch (command) {
+	case NBDRIVER_IOC_READ_PROCESS:
+		return nbdriver_read_ioctl(argument);
 	case NBDRIVER_IOC_GET_ABI:
 		if (!argument) {
 			nbd_warn("stage=ioctl command=get_abi reason=null_argument error=%d\n",

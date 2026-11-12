@@ -38,3 +38,16 @@ int nbdriver_get_abi(int fd, struct nbdriver_abi_info *info)
 
 	return ioctl(fd, NBDRIVER_IOC_GET_ABI, info);
 }
+
+int nbdriver_read_process(int fd, struct nbdriver_read_request *request)
+{
+	if (fd < 0 || !request) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	request->copied = 0;
+	request->error = 0;
+	request->failed_address = 0;
+	return ioctl(fd, NBDRIVER_IOC_READ_PROCESS, request);
+}
