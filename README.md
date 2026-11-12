@@ -2,7 +2,7 @@
 
 面向 ARM64 Android 内核的驱动重写工程。
 
-当前阶段：具备最小 `/dev/nbdriver` + ioctl 通信样例和共享 ABI 查询。尚未迁移业务功能；目标内核模块编译、QEMU 与设备调用都待验证。
+当前阶段：最小 `/dev/nbdriver` + ioctl 通信样例已通过六个 Android common KMI 的远程 DDK 编译。尚未迁移业务功能；QEMU 与设备调用待验证。
 
 ```text
 nbdriver/
@@ -36,7 +36,7 @@ nbdriver/
 
 通信接口为常规 `/dev/nbdriver` 字符设备与 ioctl；共享 ABI 定义在 `include/nbdriver_abi.h`。兼容策略和未验证项见 `docs/kernel-compatibility.md`。
 
-GitHub Actions 为 5.10、5.15、6.1、6.6、6.12、6.18 六个 Android common KMI 配置独立构建任务。任务尚未运行；通过构建也不等于目标设备已验证。
+GitHub Actions 的 5.10、5.15、6.1、6.6、6.12、6.18 六个 KMI 构建和 SDK/ABI 检查均已通过：[运行记录](https://github.com/libUE4/nbdriver/actions/runs/43186897551)。具体构建源码、vermagic、哈希和限制见 [远程编译记录](docs/remote-build.md)。构建通过不等于目标设备已验证。
 
 SDK 目前只封装打开设备与查询 ABI；业务模块、调用示例和设备回归测试尚未迁移。
 

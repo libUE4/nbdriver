@@ -14,16 +14,18 @@ misc 字符设备减少了对 syscall 内部实现的依赖，但它**不自动�
 
 | Android common KMI | 当前证据 | 模块构建/加载/调用状态 |
 |---|---|---|
-| `android12-5.10` | 源码比较已记录；目标 misc KMI 列表和 DDK 未取得 | 未验证 |
-| `android13-5.15` | 源码比较已记录；目标 misc KMI 列表和 DDK 未取得 | 未验证 |
-| `android14-6.1` | 源码比较已记录；目标 misc KMI 列表和 DDK 未取得 | 未验证 |
-| `android15-6.6` | 源码比较已记录；目标 misc KMI 列表和 DDK 未取得 | 未验证 |
-| `android16-6.12` | 源码比较已记录；目标 misc KMI 列表和 DDK 未取得 | 未验证 |
-| `android17-6.18` | 源码比较已记录；目标 misc KMI 列表和 DDK 未取得 | 未验证 |
+| `android12-5.10` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
+| `android13-5.15` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
+| `android14-6.1` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
+| `android15-6.6` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
+| `android16-6.12` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
+| `android17-6.18` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
+
+本轮构建任务、实际 vermagic、源码提交与下载哈希见 [远程编译记录](remote-build.md)。日志没有编译或 modpost warning/error，但该结果仅说明对应 DDK 接受本模块，不取代设备 KMI/签名/SELinux 和实机调用验证。
 
 `android13-5.10` 的 `abi_gki_aarch64_generic` 文件确认包含 `misc_register` 和 `misc_deregister`；这不是 `android12-5.10`、其他 KMI 或任意厂商模块符号清单的证据。[该 GKI 符号列表](https://android.googlesource.com/kernel/common/+/refs/heads/android13-5.10/android/abi_gki_aarch64_generic)
 
-对六个 common 分支 `arch/arm64/kernel/syscall.c` 的源码比较及 SHA-256 见 `docs/communication-sources.sha256`。该比较确认 syscall 内部实现有演进，但不作为外部模块 API 兼容证据。系统调用实现细节不再作为通信接口依赖。
+此前对六个 common 分支 `arch/arm64/kernel/syscall.c` 的比较及 SHA-256 已原样保存在 [历史调查归档](research/syscall-source-survey.md)。本轮没有重新下载核验这些哈希，不将它们当作本轮实测证据。`communication-sources.sha256` 记录的是工作区参考工程文件，二者不同。系统调用实现细节不再作为通信接口依赖。
 
 此前匿名 FD 原型的两个阻断点也留档如下：`nbdriver_entry_kprobe.c` 的 pre-handler 直接调用 `copy_to_user()`；Kprobes 文档说明 pre-handler 从断点 trap 路径调用，locking 文档将 `copy_to_user()` 列为可能睡眠的函数并禁止在不可睡眠上下文使用。这里是静态审查结论，不是设备上触发过的运行观察。[Kprobes 文档](https://docs.kernel.org/trace/kprobes.html)、[locking 文档](https://docs.kernel.org/kernel-hacking/locking.html)
 
@@ -42,7 +44,9 @@ misc 字符设备减少了对 syscall 内部实现的依赖，但它**不自动�
 - 已连接设备报告 ARM64、Android 15、`6.6.30-酷安姜北尘`。该设备不是可识别的上游 `android15-6.6` 构建产物，因此只能作为独立厂商目标。
 - 设备 config 可读，观察到 `CONFIG_MODULES=y`、`CONFIG_MODVERSIONS=y`、`CONFIG_MODULE_SIG=y`、`CONFIG_KPROBES=y`、`CONFIG_KALLSYMS=y`、`CONFIG_IKHEADERS=m`；未观察到 `CONFIG_MODULE_SIG_FORCE=y`。这不证明该设备接受任意模块，也不等于 DDK 或符号版本表已经取得。
 - 构建容器、QEMU ARM64 system binary 和目标 `Module.symvers` 当前未在宿主可用环境中发现。
+- 本次改用 GitHub Actions 远程 DDK 构建，六个目标全部完成编译并下载核验；宿主无需本地 DDK。6.18 初始化时出现过 runner 磁盘不足，已修复并重跑成功，详见验证记录。
 - 没有在设备加载本模块，也没有进行 ioctl 往返。真机集成状态为未验证。
+- `android15-6.6` 产物的 vermagic 为 `6.6.127-4k-g46a034eca005-dirty`，不同于当前设备的 `6.6.30`；不能直接将该产物标记为当前设备适配完成。
 
 ## 依据与限制
 
@@ -52,4 +56,4 @@ misc 字符设备减少了对 syscall 内部实现的依赖，但它**不自动�
 - [Linux 6.6 外部模块构建文档](https://kernel.org/doc/html/v6.6/kbuild/modules.html)：外部模块需匹配目标内核构建；`modules_prepare` 本身不会生成启用 MODVERSIONS 所需的 `Module.symvers`。
 - [Android common `android13-5.10` generic ABI 符号列表](https://android.googlesource.com/kernel/common/+/refs/heads/android13-5.10/android/abi_gki_aarch64_generic)：该特定列表明确包含 misc 注册/注销符号；不能泛化为所有分支。
 
-更细的实际命令、编译输出和设备事实见 `docs/validation/latest.json`。不完整的目标符号清单不在这里推断为存在或缺失；逐目标 DDK 编译与设备验证仍是后续必需项。
+更细的实际命令、编译输出和设备事实见 `docs/validation/latest.json` 及 `docs/validation/host-before-remote.json`。不完整的目标符号清单不在这里推断为存在或缺失；设备侧加载和调用验证仍是后续必需项。

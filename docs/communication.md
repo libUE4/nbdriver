@@ -40,7 +40,7 @@
 1. `include/nbdriver_abi.h` 是唯一协议定义，用户态与内核态共用，结构使用固定宽度字段。
 2. 当前以 `open("/dev/nbdriver")` 获取设备 FD，再用 ioctl 查询 ABI 信息。
 3. syscall 表改写、reboot 探针和 kallsyms resolver 已从 nbdriver 的构建对象移除，不作为兼容入口。
-4. 5.10–6.18 Android common 的源码比较和 KMI 限制见 [kernel-compatibility.md](kernel-compatibility.md)；逐目标 KMI 编译、QEMU 和真机验证仍待完成。
+4. 5.10–6.18 Android common 的 KMI 限制见 [kernel-compatibility.md](kernel-compatibility.md)；本轮六个目标 DDK 编译已通过，QEMU 和真机验证仍待完成。
 5. 后续功能按实际模块命名，并在 `src/Makefile` 显式添加对象。
 
 本阶段只实现 ABI 查询通信骨架，没有迁移 NBG-driver 业务功能。
