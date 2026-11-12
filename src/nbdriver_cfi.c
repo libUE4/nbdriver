@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * CFI compatibility port from workspace lsdriver/export_fun.h and Makefile.
- * Legacy slowpath handling uses the synchronous text patch API; KCFI uses
- * local call-site exemptions and retains module callback type metadata.
+ * Prefer local call-site exemptions and keep callback type metadata intact.
+ * Legacy global slowpath patch is opt-in and not part of the normal build.
  */
 #include <linux/bug.h>
 #include <linux/errno.h>
@@ -14,6 +14,21 @@
 #include "nbdriver_log.h"
 
 #ifdef NBDRIVER_LEGACY_CFI
+/* Match the legacy CFI failure handler even when global patching is off. */
+void __noreturn NBDRIVER_NO_CFI
+__ubsan_handle_cfi_check_fail_abort(void *data, void *ptr, void *vtable);
+
+void __noreturn NBDRIVER_NO_CFI
+__ubsan_handle_cfi_check_fail_abort(void *data, void *ptr, void *vtable)
+{
+	(void)data;
+	(void)ptr;
+	(void)vtable;
+	BUG();
+}
+#endif
+
+#if defined(NBDRIVER_LEGACY_CFI) && defined(NBDRIVER_ENABLE_GLOBAL_CFI_PATCH)
 #define NBDRIVER_BTI_C 0xd503245fU
 #define NBDRIVER_RET_X30 0xd65f03c0U
 #define NBDRIVER_CFI_MAX_PATCHES 6
@@ -26,19 +41,6 @@ static void *nbdriver_cfi_addresses[NBDRIVER_CFI_MAX_PATCHES];
 static u32 nbdriver_cfi_original[NBDRIVER_CFI_MAX_PATCHES];
 static int nbdriver_cfi_count;
 
-/* Same fail-closed handler as lsdriver for legacy vendor KMI omissions. */
-void __noreturn NBDRIVER_NO_CFI
-__ubsan_handle_cfi_check_fail_abort(void *data, void *ptr, void *vtable);
-
-void __noreturn NBDRIVER_NO_CFI
-__ubsan_handle_cfi_check_fail_abort(void *data, void *ptr, void *vtable)
-{
-	(void)data;
-	(void)ptr;
-	(void)vtable;
-	BUG();
-}
-
 /* Keep the exemption at this actual indirect call, even under inlining/LTO. */
 static noinline int NBDRIVER_NO_CFI
 nbdriver_cfi_patch(void *addresses[], u32 instructions[], int count)
@@ -49,7 +51,7 @@ nbdriver_cfi_patch(void *addresses[], u32 instructions[], int count)
 
 int nbdriver_cfi_init(void)
 {
-#ifdef NBDRIVER_LEGACY_CFI
+#if defined(NBDRIVER_LEGACY_CFI) && defined(NBDRIVER_ENABLE_GLOBAL_CFI_PATCH)
 	static const char *const symbols[] = {
 		"__cfi_slowpath",
 		"__cfi_slowpath_diag",
@@ -111,14 +113,14 @@ int nbdriver_cfi_init(void)
 	nbd_info("stage=cfi_init mode=legacy slowpaths=%d status=patched\n",
 		 count / 2);
 #else
-	nbd_info("stage=cfi_init mode=local_calls callback_cfi=preserved\n");
+	nbd_info("stage=cfi_init mode=local_calls callback_cfi=preserved global_patch=off\n");
 #endif
 	return 0;
 }
 
 void nbdriver_cfi_exit(void)
 {
-#ifdef NBDRIVER_LEGACY_CFI
+#if defined(NBDRIVER_LEGACY_CFI) && defined(NBDRIVER_ENABLE_GLOBAL_CFI_PATCH)
 	if (nbdriver_cfi_count) {
 		int ret = nbdriver_cfi_patch(nbdriver_cfi_addresses,
 					    nbdriver_cfi_original, nbdriver_cfi_count);
