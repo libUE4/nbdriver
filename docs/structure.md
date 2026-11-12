@@ -1,7 +1,7 @@
 # 文件组织约定
 
 - `include/nbdriver_abi.h` 仅存放内核与用户态共用的协议定义，不依赖内核内部类型。
-- `src/nbdriver_main.c` 管理模块生命周期；`src/nbdriver_comm.c/.h` 管理 misc 设备和 ioctl 分发。
+- `src/nbdriver_main.c` 管理模块生命周期；`nbdriver_comm.c/.h` 管理匿名 FD 与 ioctl；`nbdriver_entry.c/.h` 管理安装入口生命周期；`nbdriver_entry_reboot.c` 管理 reboot kprobe 和 task_work。
 - 后续功能按实际模块拆分，同名头文件提供模块内部接口；完成实现后显式加入 `src/Makefile`。
 - `include/nbdriver_abi.h` 是内核和用户态共用协议的唯一来源。
 - `sdk/include/nbdriver/` 是 SDK 对外接口；`sdk/src/` 实现调用封装；示例按实际需求添加到 `sdk/examples/`。

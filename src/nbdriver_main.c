@@ -5,6 +5,7 @@
 
 #include "nbdriver_abi.h"
 #include "nbdriver_comm.h"
+#include "nbdriver_entry.h"
 
 static int __init nbdriver_init(void)
 {
@@ -15,6 +16,12 @@ static int __init nbdriver_init(void)
 		pr_err("nbdriver: stage=module_init dependency=comm status=failed error=%d\n", ret);
 		return ret;
 	}
+	ret = nbdriver_entry_init();
+	if (ret) {
+		pr_err("nbdriver: stage=module_init dependency=entry status=failed error=%d\n", ret);
+		nbdriver_comm_exit();
+		return ret;
+	}
 
 	pr_info("nbdriver: 已加载, abi=%u\n", NBDRIVER_ABI_VERSION);
 	return 0;
@@ -22,6 +29,7 @@ static int __init nbdriver_init(void)
 
 static void __exit nbdriver_exit(void)
 {
+	nbdriver_entry_exit();
 	nbdriver_comm_exit();
 	pr_info("nbdriver: 已卸载\n");
 }

@@ -39,8 +39,8 @@ int main(int argc, char **argv)
 			fprintf(stderr, "device still opens after unload\n");
 			return 1;
 		}
-		printf("device_absent: errno=%d expected_errno=%d\n", saved_errno, ENOENT);
-		return saved_errno == ENOENT ? 0 : 1;
+		printf("bootstrap_absent: errno=%d expected_errno=%d\n", saved_errno, ENODEV);
+		return saved_errno == ENODEV ? 0 : 1;
 	}
 	if (argc != 1) {
 		fprintf(stderr, "usage: %s [--expect-absent]\n", argv[0]);

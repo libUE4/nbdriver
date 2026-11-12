@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/errno.h>
+#include <linux/anon_inodes.h>
+#include <linux/fdtable.h>
+#include <linux/file.h>
 #include <linux/fs.h>
-#include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/uaccess.h>
 
@@ -38,19 +40,41 @@ static const struct file_operations nbdriver_fops = {
 	.compat_ioctl = nbdriver_ioctl,
 };
 
-static struct miscdevice nbdriver_device = {
-	.minor = MISC_DYNAMIC_MINOR,
-	.name = "nbdriver",
-	.fops = &nbdriver_fops,
-	.mode = 0600,
-};
+int nbdriver_comm_install_fd_to_user(int __user *output_fd)
+{
+	struct file *file;
+	int fd;
+
+	if (!output_fd)
+		return -EFAULT;
+
+	fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0)
+		return fd;
+
+	file = anon_inode_getfile("[nbdriver]", &nbdriver_fops, NULL,
+				  O_RDWR | O_CLOEXEC);
+	if (IS_ERR(file)) {
+		put_unused_fd(fd);
+		return PTR_ERR(file);
+	}
+
+	if (copy_to_user(output_fd, &fd, sizeof(fd))) {
+		pr_err("nbdriver: copy fd to userspace failed\n");
+		fput(file);
+		put_unused_fd(fd);
+		return -EFAULT;
+	}
+
+	fd_install(fd, file);
+	return 0;
+}
 
 int nbdriver_comm_init(void)
 {
-	return misc_register(&nbdriver_device);
+	return 0;
 }
 
 void nbdriver_comm_exit(void)
 {
-	misc_deregister(&nbdriver_device);
 }

@@ -15,6 +15,8 @@ typedef int32_t nbdriver_s32;
 #endif
 
 #define NBDRIVER_ABI_VERSION 2U
+#define NBDRIVER_INSTALL_MAGIC1 0x4E424452U
+#define NBDRIVER_INSTALL_MAGIC2 0x5244424EU
 
 struct nbdriver_abi_info {
 	nbdriver_u32 version;
