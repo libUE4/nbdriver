@@ -1,0 +1,183 @@
+{
+  "date": "2026-11-12",
+  "objective": "Establish a conventional misc-device ioctl communication path and a per-KMI Android ARM64 build strategy.",
+  "change_scope": "Communication/ABI scaffold only; no NBG-driver business function migration; no device module load.",
+  "backup": "/root/workspace/.aicode/nbdriver/compat-audit-before-20261112",
+  "backup_sha256_verified": true,
+  "backup_files": 14,
+  "host_commands": [
+    {
+      "command": [
+        "bash",
+        "-n",
+        "build.sh"
+      ],
+      "stdout": "",
+      "stderr": "",
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "cc",
+        "-D_GNU_SOURCE",
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Iinclude",
+        "-Isdk/include",
+        "-fsyntax-only",
+        "sdk/src/client.c"
+      ],
+      "stdout": "",
+      "stderr": "",
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "cc",
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Iinclude",
+        "tests/abi_header_check.c",
+        "-o",
+        "/tmp/nbdriver-abi-header-check"
+      ],
+      "stdout": "",
+      "stderr": "",
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "/tmp/nbdriver-abi-header-check"
+      ],
+      "stdout": "",
+      "stderr": "",
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "stdout": "",
+      "stderr": "",
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "make",
+        "check-source"
+      ],
+      "stdout": "",
+      "stderr": "",
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "node",
+        "-e",
+        "const y=require('yaml'); const d=y.parse(require('fs').readFileSync('.github/workflows/kernel-matrix.yml','utf8')); if(!d.jobs.kernel||!d.jobs['abi-check'])process.exit(2);"
+      ],
+      "stdout": "",
+      "stderr": "",
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "./build.sh",
+        "build"
+      ],
+      "stdout": "make: Entering directory '/root/workspace/nbdriver'\nmake: Leaving directory '/root/workspace/nbdriver'\n",
+      "stderr": "请指定 KDIR=/path/to/kernel/build\nmake: *** [Makefile:15: check-kdir] Error 1\n",
+      "exit_code": 2
+    }
+  ],
+  "environment": {
+    "qemu_system_aarch64": null,
+    "qemu_available": false,
+    "target_kernel_build_files_found": false,
+    "device_observations": [
+      {
+        "command": [
+          "adb",
+          "shell",
+          "uname",
+          "-a"
+        ],
+        "stdout": "Linux localhost 6.6.30-酷安姜北尘 #2 SMP PREEMPT Tue Dec 17 23:36:49 UTC 2024 aarch64 Toybox\n",
+        "stderr": "",
+        "exit_code": 0
+      },
+      {
+        "command": [
+          "adb",
+          "shell",
+          "getprop",
+          "ro.build.version.release"
+        ],
+        "stdout": "15\n",
+        "stderr": "",
+        "exit_code": 0
+      },
+      {
+        "command": [
+          "adb",
+          "shell",
+          "getprop",
+          "ro.boot.verifiedbootstate"
+        ],
+        "stdout": "green\n",
+        "stderr": "",
+        "exit_code": 0
+      },
+      {
+        "command": [
+          "adb",
+          "shell",
+          "getprop",
+          "ro.boot.vbmeta.device_state"
+        ],
+        "stdout": "locked\n",
+        "stderr": "",
+        "exit_code": 0
+      },
+      {
+        "command": [
+          "adb",
+          "shell",
+          "su",
+          "-c",
+          "zcat /proc/config.gz | grep -E \"CONFIG_(MODULES|MODVERSIONS|MODULE_SIG|MODULE_SIG_FORCE|KPROBES|KALLSYMS|IKHEADERS)=\""
+        ],
+        "stdout": "CONFIG_IKHEADERS=m\nCONFIG_KALLSYMS=y\nCONFIG_KPROBES=y\nCONFIG_MODULES=y\nCONFIG_MODVERSIONS=y\nCONFIG_MODULE_SIG=y\n",
+        "stderr": "",
+        "exit_code": 0
+      }
+    ],
+    "kmi_actions_workflow": "configured for six KMI targets; not executed in GitHub Actions",
+    "module_build": "not completed: no target KDIR/Module.symvers; ./build.sh build fails with KDIR-not-specified diagnostic",
+    "qemu_runtime": "not run: qemu-system-aarch64 unavailable",
+    "device_module_load_and_ioctl": "not run"
+  },
+  "source_sha256": {
+    "src/.gitkeep": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/Makefile": "e3f4f8a81182d280bb31cc136c6d3befbbea2dde7eecd237cc48b6d8660c056d",
+    "src/nbdriver_comm.c": "93de61780a2b84a642659a77098ba7c88be0d71d7b9b3d26637c2d07badab56b",
+    "src/nbdriver_comm.h": "e342f3bc1cc5c778fa1b520ea0509c5bacdd2ebe3cc74424d15cca9bce4a3e2b",
+    "src/nbdriver_main.c": "adf362cad37f138c60259e8a83bce0c294bb649e60a3f7de8c5e6dd56bcef67f",
+    "include/nbdriver_abi.h": "a1bcae085d2813de154a86d71cca3aeca0ed0a67b1f70c3188e08b6becd23b0a",
+    "sdk/README.md": "83a4e88847664d07ba94565f82ed4b6acc2a0030834354ee0c1718a09c57752b",
+    "sdk/examples/.gitkeep": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sdk/include/.gitkeep": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sdk/include/nbdriver/client.h": "f96675faf24ba6f4f90feb1c944d4ff8a1407b9363736919d653a2fe5e62d309",
+    "sdk/src/.gitkeep": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sdk/src/client.c": "4b05bdd7a3963c646b247d74f22bc3cda1f43c9b220d3a8d910f972768ae5d74",
+    "tests/.gitkeep": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tests/abi_header_check.c": "d1f9143de6513ca9033aae05034b477f22c14e03d827e05acd69cda2cbe41f25",
+    ".github/workflows/kernel-matrix.yml": "015e1a22e6332c55d801dbeec4875900f70ed46b9cfea01b72901007d0e94009"
+  }
+}

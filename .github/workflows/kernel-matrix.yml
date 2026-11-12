@@ -1,0 +1,75 @@
+name: Android kernel KMI build matrix
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  abi-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check SDK and shared ABI
+        run: |
+          set -euo pipefail
+          cc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror \
+            -Iinclude -Isdk/include -fsyntax-only sdk/src/client.c
+          cc -std=c11 -Wall -Wextra -Werror -Iinclude \
+            tests/abi_header_check.c -o /tmp/nbdriver-abi-header-check
+          /tmp/nbdriver-abi-header-check
+
+  kernel:
+    name: Build ${{ matrix.kmi }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android12-5.10
+          - android13-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+          - android17-6.18
+    container:
+      image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-20260828
+    defaults:
+      run:
+        shell: bash
+    env:
+      KMI: ${{ matrix.kmi }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build ARM64 module
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1
+          test -s src/nbdriver.ko
+      - name: Prepare module and hash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp src/nbdriver.ko "out/nbdriver-${KMI}.ko"
+          sha256sum "out/nbdriver-${KMI}.ko" > "out/nbdriver-${KMI}.ko.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nbdriver-${{ matrix.kmi }}
+          path: |
+            out/nbdriver-${{ matrix.kmi }}.ko
+            out/nbdriver-${{ matrix.kmi }}.ko.sha256
+          if-no-files-found: error
+          retention-days: 30

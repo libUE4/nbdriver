@@ -2,7 +2,30 @@
 #ifndef NBDRIVER_ABI_H
 #define NBDRIVER_ABI_H
 
-/* Protocol version reserved for the new implementation. No ioctl commands yet. */
-#define NBDRIVER_ABI_VERSION 1U
+#ifdef __KERNEL__
+#include <linux/types.h>
+#include <linux/ioctl.h>
+typedef __u32 nbdriver_u32;
+typedef __s32 nbdriver_s32;
+#else
+#include <stdint.h>
+#include <sys/ioctl.h>
+typedef uint32_t nbdriver_u32;
+typedef int32_t nbdriver_s32;
+#endif
+
+#define NBDRIVER_ABI_VERSION 2U
+
+struct nbdriver_abi_info {
+	nbdriver_u32 version;
+	nbdriver_u32 size;
+	nbdriver_u32 features;
+	nbdriver_u32 reserved;
+};
+
+#define NBDRIVER_IOC_MAGIC 'N'
+
+#define NBDRIVER_IOC_GET_ABI \
+	_IOR(NBDRIVER_IOC_MAGIC, 0x00, struct nbdriver_abi_info)
 
 #endif /* NBDRIVER_ABI_H */

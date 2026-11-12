@@ -2,7 +2,7 @@
 
 面向 ARM64 Android 内核的驱动重写工程。
 
-当前阶段：项目结构与最小模块入口已建立。尚未迁移 NBG-driver 的功能，未定义业务 ioctl，也未完成目标内核编译或设备验证。
+当前阶段：具备最小 `/dev/nbdriver` + ioctl 通信样例和共享 ABI 查询。尚未迁移业务功能；目标内核模块编译、QEMU 与设备调用都待验证。
 
 ```text
 nbdriver/
@@ -12,11 +12,10 @@ nbdriver/
 │   └── nbdriver_abi.h       # 内核与用户态共用协议
 ├── src/
 │   ├── Makefile             # Kbuild 对象列表
-│   ├── entry.c              # 模块初始化与退出
-│   ├── memory.c / memory.h  # 内存模块预留
-│   └── process.c / process.h # 进程模块预留
+│   ├── nbdriver_main.c      # 模块生命周期
+│   └── nbdriver_comm.c/.h   # misc 节点与 ioctl ABI
 ├── sdk/
-│   ├── include/             # SDK 对外接口
+│   ├── include/nbdriver/    # SDK 对外接口
 │   ├── src/                 # SDK 实现
 │   └── examples/            # 使用示例
 ├── tests/                   # 后续功能测试
@@ -33,8 +32,12 @@ nbdriver/
 ./build.sh clean KDIR=/path/to/kernel/build
 ```
 
-默认参数为 `ARCH=arm64 LLVM=1 LLVM_IAS=1`，可通过 make 参数覆盖。构建成功后模块保存到 `out/nbdriver.ko`。当前仅将 `src/entry.c` 纳入编译。
+默认参数为 `ARCH=arm64 LLVM=1 LLVM_IAS=1`，可通过 make 参数覆盖。构建成功后模块保存到 `out/nbdriver.ko`。
 
-SDK、功能模块和测试目录目前为预留位置，不代表相应功能已经实现。
+通信接口为常规 `/dev/nbdriver` 字符设备与 ioctl；共享 ABI 定义在 `include/nbdriver_abi.h`。兼容策略和未验证项见 `docs/kernel-compatibility.md`。
+
+GitHub Actions 为 5.10、5.15、6.1、6.6、6.12、6.18 六个 Android common KMI 配置独立构建任务。任务尚未运行；通过构建也不等于目标设备已验证。
+
+SDK 目前只封装打开设备与查询 ABI；业务模块、调用示例和设备回归测试尚未迁移。
 
 新建源码采用 GPL-2.0-only；后续迁移其他来源代码时，应保留并核对原有许可与版权信息。
