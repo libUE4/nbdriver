@@ -8,6 +8,8 @@
 #include <linux/sched/mm.h>
 #include <linux/sched/task.h>
 #include <linux/slab.h>
+#include <linux/version.h>
+#include <linux/highmem.h>
 #include <linux/uaccess.h>
 
 #include <asm/memory.h>
@@ -101,8 +103,23 @@ static int nbdriver_read_target(struct nbdriver_read_request *request, u8 *bytes
 		ret = nbdriver_walk_get_page(vma, at, &page);
 		if (ret)
 			break;
-		memcpy(bytes + request->copied,
-		       (u8 *)page_address(page) + offset_in_page(at), length);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+		{
+			void *mapped = kmap_local_page(page);
+
+			memcpy(bytes + request->copied,
+			       (u8 *)mapped + offset_in_page(at), length);
+			kunmap_local(mapped);
+		}
+#else
+		{
+			void *mapped = kmap_atomic(page);
+
+			memcpy(bytes + request->copied,
+			       (u8 *)mapped + offset_in_page(at), length);
+			kunmap_atomic(mapped);
+		}
+#endif
 		nbdriver_walk_put_page(page);
 		request->copied += length;
 	}
