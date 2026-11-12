@@ -10,6 +10,7 @@ _Static_assert(offsetof(struct nbdriver_read_request, address) == 8U, "read addr
 _Static_assert(offsetof(struct nbdriver_read_request, expected_start_ns) == 24U,
 	"read identity offset");
 _Static_assert(offsetof(struct nbdriver_read_request, copied) == 40U, "read result offset");
+_Static_assert(offsetof(struct nbdriver_read_request, error) == 44U, "read error offset");
 _Static_assert(_IOC_SIZE(NBDRIVER_IOC_READ_PROCESS) == 48U, "read ioctl size");
 _Static_assert(_IOC_TYPE(NBDRIVER_IOC_READ_PROCESS) == NBDRIVER_IOC_MAGIC,
 	"read ioctl type");
