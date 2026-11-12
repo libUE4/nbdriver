@@ -50,7 +50,7 @@ struct page { int refs, reserved, slab; struct page *head; };
 #define MT_NORMAL_TAGGED 2UL
 #define MT_NORMAL_NC 3UL
 #define PTE_ATTRINDX(x) ((x) << 8)
-#define PFN_SHIFT 16
+#define PFN_SHIFT 20
 #define __pte(v) ((pte_t){ (v) })
 #define READ_ONCE(v) (v)
 #define pte_val(v) ((v).value)
