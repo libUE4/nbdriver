@@ -64,9 +64,13 @@ jobs:
           docker run --rm --entrypoint /bin/bash \
             --mount "type=bind,source=${GITHUB_WORKSPACE},target=/work" \
             --workdir /work \
+            --env KMI --env GITHUB_SHA \
+            --env "DDK_IMAGE_REFERENCE=ghcr.io/ylarod/ddk:${KMI}-20260828" \
             "ghcr.io/ylarod/ddk:${KMI}-20260828" -euc '
               make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}" \
                 ARCH=arm64 LLVM=1 LLVM_IAS=1
+              python3 tools/ddk_symbol_audit.py --kdir "$KERNEL_SRC" \
+                --module src/nbdriver.ko --output "out/ddk-symbols-${KMI}.json"
             '
           sudo chown -R -- "$(id -u):$(id -g)" src out
           test -s src/nbdriver.ko
@@ -82,5 +86,6 @@ jobs:
           path: |
             out/nbdriver-${{ matrix.kmi }}.ko
             out/nbdriver-${{ matrix.kmi }}.ko.sha256
+            out/ddk-symbols-${{ matrix.kmi }}.json
           if-no-files-found: error
           retention-days: 30
