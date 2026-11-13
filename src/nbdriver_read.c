@@ -305,7 +305,7 @@ long nbdriver_read_ioctl(unsigned long argument)
 	destination = u64_to_user_ptr(request.buffer);
 	if (!access_ok(destination, request.size))
 		return -EFAULT;
-	bytes = kmalloc(request.size, GFP_KERNEL);
+	bytes = kvmalloc(request.size, GFP_KERNEL);
 	if (!bytes)
 		return -ENOMEM;
 
@@ -320,7 +320,7 @@ long nbdriver_read_ioctl(unsigned long argument)
 	}
 	request.error = ret;
 	request.failed_address = ret ? request.address + request.copied : 0;
-	kfree(bytes);
+	kvfree(bytes);
 	if (copy_to_user((void __user *)argument, &request, sizeof(request)))
 		return -EFAULT;
 	return ret;
@@ -347,19 +347,19 @@ long nbdriver_write_ioctl(unsigned long argument)
 	source = u64_to_user_ptr(request.buffer);
 	if (!access_ok(source, request.size))
 		return -EFAULT;
-	bytes = kmalloc(request.size, GFP_KERNEL);
+	bytes = kvmalloc(request.size, GFP_KERNEL);
 	if (!bytes)
 		return -ENOMEM;
 	not_copied = copy_from_user(bytes, source, request.size);
 	if (not_copied) {
-		kfree(bytes);
+		kvfree(bytes);
 		return -EFAULT;
 	}
 
 	ret = nbdriver_write_target(&request, bytes);
 	request.error = ret;
 	request.failed_address = ret ? request.address + request.copied : 0;
-	kfree(bytes);
+	kvfree(bytes);
 	if (copy_to_user((void __user *)argument, &request, sizeof(request)))
 		return -EFAULT;
 	return ret;

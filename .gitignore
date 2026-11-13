@@ -11,6 +11,7 @@ modules.order
 
 # Local build output
 /out/*
+/tests/nbdriver_smoke
 !/out/.gitkeep
 /build/
 /sdk/build/

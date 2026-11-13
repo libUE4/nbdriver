@@ -8,6 +8,7 @@ LLVM_IAS ?= 1
 TUSI_NDK ?= $(HOME)/workspace/tusi-ndk/android-ndk-aide
 SMOKE_CC ?= clang-18
 TUSI_PREBUILT := $(TUSI_NDK)/toolchains/llvm/prebuilt/linux-arm
+SMOKE_OUTPUT ?= $(PROJECT_DIR)/tests/nbdriver_smoke
 
 .PHONY: all smoke clean check-source check-kdir help
 
@@ -24,7 +25,7 @@ all: check-source check-kdir
 	cp "$(PROJECT_DIR)/src/nbdriver.ko" "$(PROJECT_DIR)/out/nbdriver.ko"
 
 smoke:
-	mkdir -p "$(PROJECT_DIR)/out"
+	mkdir -p "$(dir $(SMOKE_OUTPUT))"
 	$(SMOKE_CC) --target=aarch64-linux-android21 \
 		--sysroot="$(TUSI_PREBUILT)/sysroot" \
 		-resource-dir="$(TUSI_PREBUILT)/lib/clang/21" \
@@ -32,7 +33,7 @@ smoke:
 		-O2 -Wall -Wextra -Werror -pthread -Wl,-z,max-page-size=16384 \
 		-I"$(PROJECT_DIR)/include" -I"$(PROJECT_DIR)/sdk/include" \
 		"$(PROJECT_DIR)/tests/nbdriver_smoke.c" "$(PROJECT_DIR)/sdk/src/client.c" \
-		-o "$(PROJECT_DIR)/out/nbdriver_smoke"
+		-o "$(SMOKE_OUTPUT)"
 
 clean: check-source check-kdir
 	$(MAKE) -C "$(KDIR)" M="$(PROJECT_DIR)/src" ARCH=$(ARCH) LLVM=$(LLVM) LLVM_IAS=$(LLVM_IAS) clean
@@ -40,4 +41,4 @@ clean: check-source check-kdir
 
 help:
 	@echo "make [all|clean] KDIR=/path/to/kernel/build [ARCH=arm64 LLVM=1 LLVM_IAS=1]"
-	@echo "make smoke [TUSI_NDK=/path/to/android-ndk-aide SMOKE_CC=clang-18]"
+	@echo "make smoke [TUSI_NDK=/path/to/android-ndk-aide SMOKE_CC=clang-18 SMOKE_OUTPUT=tests/nbdriver_smoke]"
