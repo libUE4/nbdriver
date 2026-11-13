@@ -12,9 +12,7 @@
 #include <linux/highmem.h>
 #include <linux/uaccess.h>
 
-#include <asm/cacheflush.h>
 #include <asm/memory.h>
-#include <asm/pgtable.h>
 
 #include "nbdriver_abi.h"
 #include "nbdriver_cfi.h"
@@ -182,6 +180,10 @@ static int nbdriver_write_target(struct nbdriver_write_request *request,
 			ret = -EACCES;
 			break;
 		}
+		if (vma->vm_flags & VM_EXEC) {
+			ret = -EOPNOTSUPP;
+			break;
+		}
 		if (vma->vm_flags & (VM_IO | VM_PFNMAP | VM_MIXEDMAP | VM_HUGETLB)) {
 			ret = -EOPNOTSUPP;
 			break;
@@ -205,8 +207,6 @@ static int nbdriver_write_target(struct nbdriver_write_request *request,
 		kunmap_atomic(mapped);
 #endif
 		flush_dcache_page(page);
-		if (vma->vm_flags & VM_EXEC)
-			__sync_icache_dcache(mk_pte(page, vma->vm_page_prot));
 		set_page_dirty_lock(page);
 		nbdriver_walk_put_page(page);
 		request->copied += length;
