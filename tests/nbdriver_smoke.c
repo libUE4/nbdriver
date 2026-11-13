@@ -1184,6 +1184,7 @@ static int test_executable_mapping(int fd)
 		(void)munmap(code, page_size);
 	}
 #else
+	(void)fd;
 	skip_result("anonymous_rwx_arm64_instruction_test");
 #endif
 	return 0;
