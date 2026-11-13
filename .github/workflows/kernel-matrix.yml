@@ -1,9 +1,13 @@
 name: Android kernel KMI build matrix
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
+    inputs:
+      kmi:
+        description: '单个 KMI；留空或 all 编译全部'
+        required: false
+        default: all
+        type: string
 
 permissions:
   contents: read
@@ -19,14 +23,60 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Check SDK and shared ABI
+      - name: Check SDK syntax
         run: |
           set -euo pipefail
           cc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror \
             -Iinclude -Isdk/include -fsyntax-only sdk/src/client.c
+
+      - name: Check shared ABI
+        run: |
+          set -euo pipefail
           cc -std=c11 -Wall -Wextra -Werror -Iinclude \
             tests/abi_header_check.c -o /tmp/nbdriver-abi-header-check
           /tmp/nbdriver-abi-header-check
+
+      - name: Check synthetic page-table walker
+        run: |
+          set -euo pipefail
+          python3 tests/test_walk.py
+          python3 tests/test_read_permissions.py
+
+      - name: Check standalone SDK and process/batch helpers
+        run: |
+          set -euo pipefail
+          python3 tests/test_single_header.py
+          python3 tests/test_readv.py
+          python3 tests/test_metadata.py
+          python3 tests/test_mapping.py
+          cc -std=c11 -Wall -Wextra -Werror -Iinclude -Isdk/include \
+            tests/devpts_host_check.c -Wl,--wrap=ioctl -o /tmp/nbdriver-devpts-sdk
+          /tmp/nbdriver-devpts-sdk
+          cc -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -Isdk/include \
+            tests/devpts_filter_smoke.c -o /tmp/nbdriver-devpts-probe
+          cc -std=c11 -Wall -Wextra -Werror -Iinclude -Isrc \
+            tests/query_rules_check.c -o /tmp/nbdriver-query-rules
+          /tmp/nbdriver-query-rules
+          cc -std=c11 -Wall -Wextra -Werror -Isdk/include \
+            tests/query_sdk_check.c -Wl,--wrap=ioctl -o /tmp/nbdriver-query-sdk
+          /tmp/nbdriver-query-sdk
+          cc -std=c11 -Wall -Wextra -Werror -pthread -Isdk/include \
+            tests/device_query_readv_smoke.c -o /tmp/nbdriver-query-probe
+          cc -std=c11 -Wall -Wextra -Werror -Isdk/include \
+            tests/metadata_sdk_check.c -Wl,--wrap=ioctl -o /tmp/nbdriver-metadata-sdk
+          /tmp/nbdriver-metadata-sdk
+          cc -std=c11 -Wall -Wextra -Werror -Isdk/include \
+            tests/device_metadata_smoke.c -o /tmp/nbdriver-metadata-probe
+
+      - name: Check device smoke programs
+        run: |
+          set -euo pipefail
+          cc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror -pthread \
+            -Iinclude -Isdk/include -fsyntax-only \
+            tests/device_read_smoke.c tests/device_write_smoke.c tests/device_ioctl_smoke.c
+          cc -D_GNU_SOURCE -std=c11 -O2 -Wall -Wextra -Werror -pthread \
+            -Iinclude -Isdk/include tests/nbdriver_smoke.c sdk/src/client.c \
+            -o /tmp/nbdriver-smoke
 
   kernel:
     name: Build ${{ matrix.kmi }}
@@ -35,15 +85,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kmi:
-          - android12-5.10
-          - android13-5.10
-          - android13-5.15
-          - android14-5.15
-          - android14-6.1
-          - android15-6.6
-          - android16-6.12
-          - android17-6.18
+        kmi: ${{ fromJSON((inputs.kmi == '' || inputs.kmi == 'all') && '["android12-5.10","android13-5.10","android13-5.15","android14-5.15","android14-6.1","android15-6.6","android16-6.12","android17-6.18"]' || format('["{0}"]', inputs.kmi)) }}
     defaults:
       run:
         shell: bash

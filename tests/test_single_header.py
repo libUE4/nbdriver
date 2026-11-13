@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""Check the isolated single-header SDK against the legacy SDK with mocked syscalls."""
+
+import argparse
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+PROBE = r'''
+#include "SDK_HEADER"
+#include "SDK_HEADER"
+#include <assert.h>
+#include <errno.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/syscall.h>
+
+static int installed_fd = 17;
+static int ioctl_count;
+static unsigned expected_start = 42;
+static int close_count;
+int sdk_second_tu(void);
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+long __wrap_syscall(long number, ...)
+{
+    va_list args;
+    assert(number == SYS_reboot);
+    va_start(args, number);
+    assert(va_arg(args, unsigned int) == NBDRIVER_INSTALL_MAGIC1);
+    assert(va_arg(args, unsigned int) == NBDRIVER_INSTALL_MAGIC2);
+    assert(va_arg(args, int) == 0);
+    *va_arg(args, int *) = installed_fd;
+    va_end(args);
+    errno = EPERM; /* The FD, rather than the reboot return value, signals success. */
+    return -1;
+}
+
+int __wrap_close(int fd)
+{
+    assert(fd == 17);
+    ++close_count;
+    return 0;
+}
+
+int __wrap_ioctl(int fd, unsigned long command, ...)
+{
+    va_list args;
+    assert(fd == 17);
+    ++ioctl_count;
+    va_start(args, command);
+    if (command == NBDRIVER_IOC_GET_ABI) {
+        struct nbdriver_abi_info *info = va_arg(args, struct nbdriver_abi_info *);
+        info->version = NBDRIVER_ABI_VERSION;
+        info->size = sizeof(*info);
+        info->features = NBDRIVER_FEATURE_READ_PROCESS | NBDRIVER_FEATURE_WRITE_PROCESS;
+        va_end(args);
+        return 0;
+    }
+    if (command == NBDRIVER_IOC_READ_PROCESS) {
+        struct nbdriver_read_request *r = va_arg(args, struct nbdriver_read_request *);
+        assert(r->copied == 0 && r->error == 0 && r->failed_address == 0);
+        assert(r->pid == 123 && r->address == 4096 && r->size == 32);
+        assert(r->buffer == 8192 && r->expected_start_ns == expected_start);
+        r->copied = 16;
+        r->error = -EFAULT;
+        r->failed_address = r->address + 16;
+        va_end(args);
+        errno = EFAULT;
+        return -1;
+    }
+    assert(command == NBDRIVER_IOC_WRITE_PROCESS);
+    struct nbdriver_write_request *w = va_arg(args, struct nbdriver_write_request *);
+    assert(w->copied == 0 && w->error == 0 && w->failed_address == 0);
+    assert(w->pid == 123 && w->address == 4096 && w->size == 32);
+    assert(w->buffer == 8192 && w->expected_start_ns == expected_start);
+    w->copied = w->size;
+    va_end(args);
+    return 0;
+}
+#ifdef __cplusplus
+}
+#endif
+
+int main(void)
+{
+    struct nbdriver_abi_info info;
+    struct nbdriver_read_request r;
+    struct nbdriver_write_request w;
+    memset(&info, 0, sizeof(info));
+    memset(&r, 0, sizeof(r));
+    memset(&w, 0, sizeof(w));
+    assert(sizeof(info) == 16 && sizeof(r) == 48 && sizeof(w) == 48);
+    assert(_IOC_SIZE(NBDRIVER_IOC_READ_PROCESS) == sizeof(r));
+    assert(_IOC_SIZE(NBDRIVER_IOC_WRITE_PROCESS) == sizeof(w));
+    assert(nbdriver_open() == 17 && errno == 0);
+    installed_fd = -1;
+    assert(nbdriver_open() == -1 && errno == ENODEV);
+    assert(nbdriver_get_abi(-1, &info) == -1 && errno == EINVAL);
+    assert(nbdriver_get_abi(17, NULL) == -1 && errno == EINVAL);
+    assert(nbdriver_read_process(-1, &r) == -1 && errno == EINVAL);
+    assert(nbdriver_read_process(17, NULL) == -1 && errno == EINVAL);
+    assert(nbdriver_write_process(-1, &w) == -1 && errno == EINVAL);
+    assert(nbdriver_write_process(17, NULL) == -1 && errno == EINVAL);
+    assert(sdk_second_tu() == -1 && errno == EINVAL);
+    assert(ioctl_count == 0);
+    assert(nbdriver_get_abi(17, &info) == 0);
+    assert(info.version == NBDRIVER_ABI_VERSION && info.size == sizeof(info));
+    assert(info.features == (NBDRIVER_FEATURE_READ_PROCESS | NBDRIVER_FEATURE_WRITE_PROCESS));
+    r.pid = w.pid = 123;
+    r.address = w.address = 4096;
+    r.size = w.size = 32;
+    r.buffer = w.buffer = 8192;
+    r.expected_start_ns = w.expected_start_ns = 42;
+    r.copied = w.copied = 99;
+    r.error = w.error = -1;
+    r.failed_address = w.failed_address = 99;
+    assert(nbdriver_read_process(17, &r) == -1 && errno == EFAULT);
+    assert(r.copied == 16 && r.error == -EFAULT && r.failed_address == 4112);
+    assert(nbdriver_write_process(17, &w) == 0 && w.copied == 32);
+    assert(ioctl_count == 3);
+#ifndef TEST_LEGACY
+    assert(nbdriver_ioctl(17, NBDRIVER_IOC_GET_ABI, &info) == 0);
+    expected_start = 0;
+    assert(nbdriver_read_process_memory(17, 123, 4096, (void *)(uintptr_t)8192, 32) == -1);
+    assert(errno == EFAULT);
+    assert(nbdriver_write_process_memory(17, 123, 4096, (void *)(uintptr_t)8192, 32) == 0);
+    assert(ioctl_count == 6);
+    assert(nbdriver_read_process_memory(-1, 123, 4096, &r, 32) == -1 && errno == EINVAL);
+    assert(nbdriver_read_process_memory(17, 0, 4096, &r, 32) == -1 && errno == EINVAL);
+    assert(nbdriver_read_process_memory(17, 123, 4096, NULL, 32) == -1 && errno == EINVAL);
+    assert(nbdriver_read_process_memory(17, 123, 4096, &r, 0) == -1 && errno == EINVAL);
+    assert(nbdriver_read_process_memory(17, 123, 4096, &r, NBDRIVER_READ_MAX + 1) == -1);
+    assert(nbdriver_write_process_memory(-1, 123, 4096, &w, 32) == -1 && errno == EINVAL);
+    assert(nbdriver_write_process_memory(17, 0, 4096, &w, 32) == -1 && errno == EINVAL);
+    assert(nbdriver_write_process_memory(17, 123, 4096, NULL, 32) == -1 && errno == EINVAL);
+    assert(nbdriver_write_process_memory(17, 123, 4096, &w, 0) == -1 && errno == EINVAL);
+    assert(nbdriver_write_process_memory(17, 123, 4096, &w, NBDRIVER_WRITE_MAX + 1) == -1);
+    assert(ioctl_count == 6);
+    nbdriver_close(-1);
+    assert(close_count == 0);
+    nbdriver_close(17);
+    assert(close_count == 1);
+#endif
+    puts("PASS: FD handshake, ABI, validation, partial read, write, multiple translation units");
+    return 0;
+}
+'''
+
+
+def run(command):
+    print("+", " ".join(map(str, command)), flush=True)
+    result = subprocess.run(list(map(str, command)), text=True, capture_output=True)
+    print(result.stdout, end="")
+    print(result.stderr, end="")
+    print("exit:", result.returncode, flush=True)
+    result.check_returncode()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--legacy", action="store_true", help="check the original SDK baseline")
+    args = parser.parse_args()
+    with tempfile.TemporaryDirectory(prefix="nbdriver-header-") as directory:
+        isolated = Path(directory)
+        name = "nbdriver/client.h" if args.legacy else "nbdriver.h"
+        if not args.legacy:
+            shutil.copy2(ROOT / "sdk/include/nbdriver.h", isolated / name)
+        for compiler, language, standard, suffix in [
+            ("cc", "c", "c11", "c"), ("c++", "c++", "c++17", "cpp")
+        ]:
+            probe = isolated / ("probe." + suffix)
+            second = isolated / ("second." + suffix)
+            probe.write_text(PROBE.replace("SDK_HEADER", name))
+            second.write_text(f'#include "{name}"\nint sdk_second_tu(void)\n'
+                              '{ return nbdriver_get_abi(-1, 0); }\n')
+            command = [compiler, "-x", language, f"-std={standard}", "-Wall", "-Wextra",
+                       "-Werror", "-pedantic", "-I", isolated, probe, second]
+            if args.legacy:
+                command += ["-DTEST_LEGACY", "-D_GNU_SOURCE", "-I", ROOT / "include", "-I",
+                            ROOT / "sdk/include", ROOT / "sdk/src/client.c"]
+            executable = isolated / ("check-" + suffix)
+            run(command + ["-Wl,--wrap=syscall", "-Wl,--wrap=ioctl", "-Wl,--wrap=close", "-o", executable])
+            run([executable])
+        if not args.legacy:
+            # Check the bundled ABI against the kernel header in separate programs.
+            expression = ('printf("%u %u %u %u %u %u %zu %zu %zu %zu %zu %zu %zu %zu %zu\\n", '
+                          'NBDRIVER_ABI_VERSION, NBDRIVER_INSTALL_MAGIC1, NBDRIVER_INSTALL_MAGIC2, '
+                          'NBDRIVER_FEATURE_READ_PROCESS, NBDRIVER_FEATURE_WRITE_PROCESS, '
+                          'NBDRIVER_FEATURE_READ_FAULT_IN, (size_t)NBDRIVER_READ_MAX, '
+                          '(size_t)NBDRIVER_WRITE_MAX, sizeof(struct nbdriver_abi_info), '
+                          'sizeof(struct nbdriver_read_request), sizeof(struct nbdriver_write_request), '
+                          '(size_t)NBDRIVER_IOC_GET_ABI, (size_t)NBDRIVER_IOC_READ_PROCESS, '
+                          '(size_t)NBDRIVER_IOC_WRITE_PROCESS, '
+                          'offsetof(struct nbdriver_read_request, expected_start_ns));')
+            for value in ['NBDRIVER_FEATURE_FIND_PROCESS', 'NBDRIVER_FEATURE_MODULE_BASE',
+                          'NBDRIVER_FEATURE_PROCESS_ID', 'NBDRIVER_FEATURE_THREAD_ID',
+                          'NBDRIVER_FEATURE_THREAD_ENV', 'NBDRIVER_FEATURE_THREAD_FP',
+                          'NBDRIVER_FEATURE_READV', 'NBDRIVER_FEATURE_MAPS',
+                          'NBDRIVER_FEATURE_MAPPING', 'NBDRIVER_FEATURE_FD_SIZE',
+                          'NBDRIVER_FEATURE_GPU_INFO', 'NBDRIVER_FEATURE_RANDOM',
+                          'NBDRIVER_IOC_MAPS', 'NBDRIVER_IOC_MAPPING', 'NBDRIVER_IOC_FD_SIZE',
+                          'NBDRIVER_IOC_GPU_INFO', 'NBDRIVER_IOC_RANDOM', 'NBDRIVER_MAPS_MAX',
+                          'NBDRIVER_RANDOM_MAX', 'NBDRIVER_MAPPING_READ', 'NBDRIVER_MAPPING_WRITE',
+                          'NBDRIVER_MAPPING_EXEC', 'NBDRIVER_MAPPING_SHARED', 'NBDRIVER_FEATURE_DEVPTS',
+                          'NBDRIVER_DEVPTS_FILTER_ABI_VERSION', 'NBDRIVER_DEVPTS_FILTER_MAX_INDEX',
+                          'NBDRIVER_DEVPTS_FILTER_DISABLE', 'NBDRIVER_DEVPTS_FILTER_ENABLE',
+                          'NBDRIVER_DEVPTS_FILTER_QUERY', 'NBDRIVER_IOC_DEVPTS_FILTER',
+                          'NBDRIVER_IOC_FIND_PROCESS',
+                          'NBDRIVER_IOC_MODULE_BASE', 'NBDRIVER_IOC_PROCESS_ID',
+                          'NBDRIVER_IOC_THREAD_ID', 'NBDRIVER_IOC_THREAD_ENV',
+                          'NBDRIVER_IOC_THREAD_FP', 'NBDRIVER_IOC_READV']:
+                expression += f'printf("%zu ", (size_t){value});'
+            for value in ['nbdriver_pid_request', 'nbdriver_module_request',
+                          'nbdriver_process_identity', 'nbdriver_thread_request',
+                          'nbdriver_thread_environment', 'nbdriver_thread_fpstate',
+                          'nbdriver_readv_entry', 'nbdriver_readv_request',
+                          'nbdriver_maps_request', 'nbdriver_mapping_request',
+                          'nbdriver_fd_size_request', 'nbdriver_gpu_object_info',
+                          'nbdriver_gpu_info_request', 'nbdriver_random_request', 'nbdriver_devpts_filter_request']:
+                expression += f'printf("%zu ", sizeof(struct {value}));'
+            for structure, fields in {
+                'nbdriver_pid_request': ['pid', 'start_ns'],
+                'nbdriver_module_request': ['expected_start_ns', 'base', 'name'],
+                'nbdriver_thread_request': ['tid', 'expected_start_ns', 'thread_start_ns', 'comm'],
+                'nbdriver_thread_environment': ['valid', 'expected_start_ns', 'tls', 'apga_lo', 'apga_hi'],
+                'nbdriver_thread_fpstate': ['valid', 'expected_start_ns', 'tls', 'sample_ns', 'fpsr', 'fpcr'],
+                'nbdriver_readv_entry': ['buffer', 'size', 'copied', 'error', 'failed_address'],
+                'nbdriver_readv_request': ['entries', 'expected_start_ns', 'completed', 'error'],
+                'nbdriver_maps_request': ['buffer', 'expected_start_ns', 'length', 'copied', 'error', 'reserved'],
+                'nbdriver_mapping_request': ['address', 'expected_start_ns', 'physical', 'page_size', 'vma_start', 'vma_end', 'flags', 'reserved2'],
+                'nbdriver_fd_size_request': ['target_fd', 'expected_start_ns', 'size', 'error', 'reserved'],
+                'nbdriver_gpu_object_info': ['flags', 'size', 'virtual_length', 'virtual_address', 'id', 'reserved'],
+                'nbdriver_gpu_info_request': ['object_id', 'expected_start_ns', 'result', 'sample_ns', 'info'],
+                'nbdriver_random_request': ['size', 'copied', 'error', 'reserved'],
+                'nbdriver_devpts_filter_request': ['pid', 'max_index', 'enabled', 'permission_hits', 'getattr_hits'],
+            }.items():
+                for field in fields:
+                    expression += f'printf("%zu ", offsetof(struct {structure}, {field}));'
+            outputs = []
+            for name, include_dir in [("nbdriver.h", isolated), ("nbdriver_abi.h", ROOT / "include")]:
+                source = isolated / "abi.c"
+                source.write_text(f'#include "{name}"\n#include <stddef.h>\n#include <stdio.h>\n'
+                                  'int main(void) { ' + expression + ' return 0; }\n')
+                executable = isolated / "abi-check"
+                run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-I", include_dir,
+                     source, "-o", executable])
+                outputs.append(subprocess.check_output([executable], text=True))
+            assert outputs[0] == outputs[1], "single-header ABI differs from kernel ABI"
+            print("PASS: standalone ABI matches kernel ABI:", outputs[0].strip())
+
+
+if __name__ == "__main__":
+    main()

@@ -14,5 +14,6 @@ void nbdriver_ksym_exit(void);
 
 /* 解析不到返回 0。调用方必须检查，不能直接解引用。 */
 unsigned long nbdriver_ksym_lookup(const char *name);
+unsigned long nbdriver_ksym_lookup_optional(const char *name);
 
 #endif /* NBDRIVER_KSYM_H */

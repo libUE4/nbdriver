@@ -68,7 +68,12 @@ def main():
     exports = read_exports(symvers)
     imports = read_imports(module, pick_nm(args.nm))
 
-    missing = [name for name in imports if name not in exports]
+    protected = {
+        "empty_zero_page", "init_mm", "sys_call_table",
+        "kallsyms_lookup_name", "task_work_add", "__set_fixmap",
+        "copy_to_kernel_nofault", "__arm64_sys_reboot",
+    }
+    missing = [name for name in imports if name not in exports or name in protected]
 
     print(f"KMI={args.kmi}")
     print(f"module={module}")
@@ -77,12 +82,15 @@ def main():
     for name in imports:
         mark = "MISSING" if name in missing else "ok"
         module_name, export_type = exports.get(name, ("-", "-"))
+        if name in protected:
+            mark = "MISSING"
+            export_type = "PROTECTED"
         print(f"  {mark:7} {name:34} {module_name:8} {export_type}")
 
     if missing:
         print()
-        print("UNRESOLVED: " + ", ".join(missing))
-        print("这些符号在目标内核未导出，insmod 会报 Unknown symbol。")
+        print("UNRESOLVED_OR_PROTECTED: " + ", ".join(missing))
+        print("这些符号不能作为模块静态导入，可能导致 Unknown symbol 或受保护符号拒绝加载。")
         return 1
 
     print()

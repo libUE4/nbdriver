@@ -17,9 +17,11 @@ SYMBOLS = [
     "sys_ni_syscall", "copy_to_kernel_nofault", "stop_machine", "__set_fixmap",
     "dcache_clean_inval_poc", "__flush_dcache_area", "init_mm",
     "__arm64_sys_reboot", "__se_sys_reboot", "__arch_copy_to_user",
+    "mm_access", "fixup_user_fault", "zero_pfn", "copy_to_user_page",
 ]
 SOURCE_PATHS = [
     "Makefile", "kernel/kallsyms.c", "kernel/task_work.c", "kernel/kprobes.c",
+    "mm/gup.c", "mm/memory.c", "arch/arm64/mm/flush.c", "include/linux/mm.h",
     "kernel/reboot.c", "fs/anon_inodes.c", "fs/file.c", "mm/maccess.c",
     "arch/arm64/kernel/sys.c", "arch/arm64/kernel/syscall.c",
     "arch/arm64/include/asm/syscall_wrapper.h", "arch/arm64/include/asm/cacheflush.h",
