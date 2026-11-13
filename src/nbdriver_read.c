@@ -12,7 +12,9 @@
 #include <linux/highmem.h>
 #include <linux/uaccess.h>
 
+#include <asm/cacheflush.h>
 #include <asm/memory.h>
+#include <asm/pgtable.h>
 
 #include "nbdriver_abi.h"
 #include "nbdriver_cfi.h"
@@ -130,6 +132,92 @@ put_task:
 	return ret;
 }
 
+static int nbdriver_write_target(struct nbdriver_write_request *request,
+				 const u8 *bytes)
+{
+	struct pid *pid;
+	struct task_struct *task;
+	struct mm_struct *mm;
+	unsigned long address = (unsigned long)request->address;
+	u64 start_ns;
+	int ret = 0;
+
+	pid = find_get_pid(request->pid);
+	if (!pid)
+		return -ESRCH;
+	task = get_pid_task(pid, PIDTYPE_TGID);
+	put_pid(pid);
+	if (!task)
+		return -ESRCH;
+	start_ns = READ_ONCE(task->start_boottime);
+	if (request->expected_start_ns && request->expected_start_ns != start_ns) {
+		ret = -ESTALE;
+		goto put_task;
+	}
+	request->expected_start_ns = start_ns;
+	mm = nbdriver_access_mm(task);
+	if (IS_ERR(mm)) {
+		ret = PTR_ERR(mm);
+		goto put_task;
+	}
+	if (!mm) {
+		ret = -ESRCH;
+		goto put_task;
+	}
+
+	mmap_read_lock(mm);
+	while (request->copied < request->size) {
+		struct vm_area_struct *vma;
+		struct page *page;
+		unsigned long at = address + request->copied;
+		size_t length;
+		void *mapped;
+
+		vma = find_vma(mm, at);
+		if (!vma || at < vma->vm_start) {
+			ret = -EFAULT;
+			break;
+		}
+		if (!(vma->vm_flags & VM_WRITE)) {
+			ret = -EACCES;
+			break;
+		}
+		if (vma->vm_flags & (VM_IO | VM_PFNMAP | VM_MIXEDMAP | VM_HUGETLB)) {
+			ret = -EOPNOTSUPP;
+			break;
+		}
+		length = min_t(size_t, request->size - request->copied,
+				   PAGE_SIZE - offset_in_page(at));
+		length = min_t(size_t, length, vma->vm_end - at);
+		ret = nbdriver_walk_get_page(vma, at, &page);
+		if (ret)
+			break;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+		mapped = kmap_local_page(page);
+#else
+		mapped = kmap_atomic(page);
+#endif
+		memcpy((u8 *)mapped + offset_in_page(at),
+		       bytes + request->copied, length);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+		kunmap_local(mapped);
+#else
+		kunmap_atomic(mapped);
+#endif
+		flush_dcache_page(page);
+		if (vma->vm_flags & VM_EXEC)
+			__sync_icache_dcache(mk_pte(page, vma->vm_page_prot));
+		set_page_dirty_lock(page);
+		nbdriver_walk_put_page(page);
+		request->copied += length;
+	}
+	mmap_read_unlock(mm);
+	mmput(mm);
+put_task:
+	put_task_struct(task);
+	return ret;
+}
+
 long nbdriver_read_ioctl(unsigned long argument)
 {
 	struct nbdriver_read_request request;
@@ -165,6 +253,45 @@ long nbdriver_read_ioctl(unsigned long argument)
 			ret = -EFAULT;
 		}
 	}
+	request.error = ret;
+	request.failed_address = ret ? request.address + request.copied : 0;
+	kfree(bytes);
+	if (copy_to_user((void __user *)argument, &request, sizeof(request)))
+		return -EFAULT;
+	return ret;
+}
+
+long nbdriver_write_ioctl(unsigned long argument)
+{
+	struct nbdriver_write_request request;
+	void __user *source;
+	u8 *bytes;
+	unsigned long not_copied;
+	int ret;
+
+	if (!capable(CAP_SYS_PTRACE))
+		return -EPERM;
+	if (copy_from_user(&request, (void __user *)argument, sizeof(request)))
+		return -EFAULT;
+	if (request.pid <= 0 || !request.size || request.size > NBDRIVER_WRITE_MAX ||
+	    !request.buffer || request.copied || request.error || request.failed_address)
+		return -EINVAL;
+	if (!request.address ||
+	    request.size > ULONG_MAX - (unsigned long)request.address)
+		return -EINVAL;
+	source = u64_to_user_ptr(request.buffer);
+	if (!access_ok(source, request.size))
+		return -EFAULT;
+	bytes = kmalloc(request.size, GFP_KERNEL);
+	if (!bytes)
+		return -ENOMEM;
+	not_copied = copy_from_user(bytes, source, request.size);
+	if (not_copied) {
+		kfree(bytes);
+		return -EFAULT;
+	}
+
+	ret = nbdriver_write_target(&request, bytes);
 	request.error = ret;
 	request.failed_address = ret ? request.address + request.copied : 0;
 	kfree(bytes);

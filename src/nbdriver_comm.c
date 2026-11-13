@@ -24,7 +24,8 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 	struct nbdriver_abi_info info = {
 		.version = NBDRIVER_ABI_VERSION,
 		.size = sizeof(info),
-		.features = NBDRIVER_FEATURE_READ_PROCESS,
+		.features = NBDRIVER_FEATURE_READ_PROCESS |
+			NBDRIVER_FEATURE_WRITE_PROCESS,
 		.reserved = 0,
 	};
 
@@ -33,6 +34,8 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 	switch (command) {
 	case NBDRIVER_IOC_READ_PROCESS:
 		return nbdriver_read_ioctl(argument);
+	case NBDRIVER_IOC_WRITE_PROCESS:
+		return nbdriver_write_ioctl(argument);
 	case NBDRIVER_IOC_GET_ABI:
 		if (!argument) {
 			nbd_warn("stage=ioctl command=get_abi reason=null_argument error=%d\n",

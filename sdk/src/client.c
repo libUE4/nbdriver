@@ -51,3 +51,16 @@ int nbdriver_read_process(int fd, struct nbdriver_read_request *request)
 	request->failed_address = 0;
 	return ioctl(fd, NBDRIVER_IOC_READ_PROCESS, request);
 }
+
+int nbdriver_write_process(int fd, struct nbdriver_write_request *request)
+{
+	if (fd < 0 || !request) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	request->copied = 0;
+	request->error = 0;
+	request->failed_address = 0;
+	return ioctl(fd, NBDRIVER_IOC_WRITE_PROCESS, request);
+}

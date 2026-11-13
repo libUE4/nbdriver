@@ -8,5 +8,6 @@ int nbdriver_open(void);
 int nbdriver_get_abi(int fd, struct nbdriver_abi_info *info);
 /* On an operational error, request still reports copied/error/failed_address. */
 int nbdriver_read_process(int fd, struct nbdriver_read_request *request);
+int nbdriver_write_process(int fd, struct nbdriver_write_request *request);
 
 #endif /* NBDRIVER_CLIENT_H */

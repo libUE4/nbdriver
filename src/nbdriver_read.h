@@ -5,5 +5,6 @@
 int nbdriver_read_init(void);
 void nbdriver_read_exit(void);
 long nbdriver_read_ioctl(unsigned long argument);
+long nbdriver_write_ioctl(unsigned long argument);
 
 #endif /* NBDRIVER_READ_H */
