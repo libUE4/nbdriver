@@ -43,11 +43,15 @@ jobs:
           set -euo pipefail
           python3 tests/test_walk.py
 
-      - name: Check device read smoke syntax
+      - name: Check device smoke programs
         run: |
           set -euo pipefail
           cc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror -pthread \
-            -Iinclude -Isdk/include -fsyntax-only tests/device_read_smoke.c
+            -Iinclude -Isdk/include -fsyntax-only \
+            tests/device_read_smoke.c tests/device_write_smoke.c tests/device_ioctl_smoke.c
+          cc -D_GNU_SOURCE -std=c11 -O2 -Wall -Wextra -Werror -pthread \
+            -Iinclude -Isdk/include tests/nbdriver_smoke.c sdk/src/client.c \
+            -o /tmp/nbdriver-smoke
 
   kernel:
     name: Build ${{ matrix.kmi }}
@@ -56,7 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kmi: ${{ fromJSON(inputs.kmi == '' || inputs.kmi == 'all' && '["android12-5.10","android13-5.10","android13-5.15","android14-5.15","android14-6.1","android15-6.6","android16-6.12","android17-6.18"]' || format('["{0}"]', inputs.kmi)) }}
+        kmi: ${{ fromJSON((inputs.kmi == '' || inputs.kmi == 'all') && '["android12-5.10","android13-5.10","android13-5.15","android14-5.15","android14-6.1","android15-6.6","android16-6.12","android17-6.18"]' || format('["{0}"]', inputs.kmi)) }}
     defaults:
       run:
         shell: bash

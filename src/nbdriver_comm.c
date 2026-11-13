@@ -25,7 +25,9 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 		.version = NBDRIVER_ABI_VERSION,
 		.size = sizeof(info),
 		.features = NBDRIVER_FEATURE_READ_PROCESS |
-			NBDRIVER_FEATURE_WRITE_PROCESS,
+			NBDRIVER_FEATURE_WRITE_PROCESS |
+			(nbdriver_read_fault_in_ready() ?
+			 NBDRIVER_FEATURE_READ_FAULT_IN : 0),
 		.reserved = 0,
 	};
 

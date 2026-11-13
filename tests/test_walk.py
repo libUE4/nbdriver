@@ -197,6 +197,8 @@ static void reset(void)
     direct_valid = true;
 }
 static unsigned int case_no;
+static bool write_mode, allow_zero;
+static unsigned long zero_pfn;
 static void expect(struct vm_area_struct *vma, unsigned long address,
                    int error, struct page *expected)
 {
@@ -204,7 +206,8 @@ static void expect(struct vm_area_struct *vma, unsigned long address,
     int ret;
     ++case_no;
     fprintf(stderr, "WALK_CASE=%u expected=%d\n", case_no, error);
-    ret = nbdriver_walk_get_page(vma, address, false, &result);
+    ret = nbdriver_walk_get_page(vma, address, write_mode, allow_zero,
+                                 zero_pfn, &result);
     if (ret != error || result != expected || locks || gets != (expected != NULL) ||
         (expected && compound_head(expected)->refs != 2)) {
         fprintf(stderr, "WALK_FAIL case=%u got=%d result=%p expected_result=%p locks=%d gets=%d refs=%d\n",
@@ -248,7 +251,22 @@ int main(void)
     reset(); pages[7].head = &pages[6]; expect(&vma, 0, 0, &pages[7]);
     reset(); mutation = 1; expect(&vma, 0, 0, &pages[7]);
     reset(); mutation = 2; expect(&vma, 0, -EAGAIN, NULL);
-    printf("walk branches: PASS PAGE_SHIFT=%d cases=22\n", PAGE_SHIFT);
+    reset(); allow_zero = true; zero_pfn = 0;
+    leaf_pte.value = (flags(0) | SPECIAL) & ~PTE_WRITE; pages[0].reserved = 1;
+    expect(&vma, 0, 0, &pages[0]);
+    reset(); leaf_pte.value = flags(7) | SPECIAL;
+    expect(&vma, 0, -EOPNOTSUPP, NULL);
+    reset(); write_mode = true;
+    leaf_pte.value = flags(0) | SPECIAL; pages[0].reserved = 1;
+    expect(&vma, 0, -EOPNOTSUPP, NULL);
+    reset(); leaf_pte.value &= ~PTE_WRITE;
+    expect(&vma, 0, -EACCES, NULL);
+    reset(); expect(&vma, 0, 0, &pages[7]);
+    reset(); root_pmd.value = flags(10) & ~PTE_WRITE;
+    expect(&vma, 0, -EACCES, NULL);
+    reset(); root_pud.value = flags(20) & ~PTE_WRITE;
+    expect(&vma, 0, -EACCES, NULL);
+    printf("walk branches: PASS PAGE_SHIFT=%d cases=%u\n", PAGE_SHIFT, case_no);
     return 0;
 }
 """

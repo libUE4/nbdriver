@@ -68,7 +68,7 @@ int main(void)
 	pthread_t thread;
 	size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
 	uint8_t *source, *destination;
-	int fd, result, saved_errno;
+	int fd, result;
 	size_t i;
 
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -180,16 +180,18 @@ int main(void)
 		void *untouched = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
 				       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 		unsigned char before = 0, after = 0;
+		uint8_t zeros[16] = { 0 };
 
 		if (untouched == MAP_FAILED || mincore(untouched, page_size, &before))
 			return 1;
-		request = request_for(untouched, destination, 16);
+		memset(destination, 0xcc, sizeof(zeros));
+		request = request_for(untouched, destination, sizeof(zeros));
 		result = nbdriver_read_process(fd, &request);
-		saved_errno = errno;
 		if (mincore(untouched, page_size, &after))
 			return 1;
-		check(result == -1 && saved_errno == ENODATA && !request.copied &&
-		      !(before & 1) && !(after & 1), "does_not_fault_in");
+		check(!result && !request.error && request.copied == sizeof(zeros) &&
+		      !(before & 1) && (after & 1) &&
+		      !memcmp(destination, zeros, sizeof(zeros)), "automatic_fault_in");
 		munmap(untouched, page_size);
 	}
 
