@@ -282,6 +282,11 @@ with tempfile.TemporaryDirectory(prefix="nbdriver-walk-") as temporary:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('#include "mock.h"\n')
     (root / "linux/errno.h").write_text('#include <asm-generic/errno.h>\n')
+    # The production walker was merged into nbdriver_core.c. Compile that
+    # exact section rather than referring to a deleted translation unit.
+    merged = (PROJECT / "src/nbdriver_core.c").read_text()
+    walker = merged.split("/* ===== BEGIN src/core/nbdriver_walk.c ===== */", 1)[1].split("/* ===== END src/core/nbdriver_walk.c ===== */", 1)[0]
+    (root / "nbdriver_walk.c").write_text(walker)
     harness = root / "test.c"
     harness.write_text(HARNESS)
     for shift in (12, 14, 16):
