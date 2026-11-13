@@ -41,7 +41,7 @@ void nbdriver_walk_put_page(struct page *page)
 }
 
 static int nbdriver_leaf_get(pte_t entry, unsigned long pfn, bool block,
-			     struct page **result)
+			     bool write, struct page **result)
 {
 	struct page *page, *head;
 	unsigned long attr = pte_val(entry) & PTE_ATTRINDX_MASK;
@@ -49,6 +49,8 @@ static int nbdriver_leaf_get(pte_t entry, unsigned long pfn, bool block,
 	if (!pte_valid(entry))
 		return -ENODATA;
 	if (!(pte_val(entry) & PTE_USER))
+		return -EACCES;
+	if (write && !pte_write(entry))
 		return -EACCES;
 	if (attr != PTE_ATTRINDX(MT_NORMAL)
 #ifdef MT_NORMAL_TAGGED
@@ -80,7 +82,7 @@ static int nbdriver_leaf_get(pte_t entry, unsigned long pfn, bool block,
 }
 
 int nbdriver_walk_get_page(struct vm_area_struct *vma, unsigned long address,
-			   struct page **result)
+			   bool write, struct page **result)
 {
 	struct mm_struct *mm = vma->vm_mm;
 	pgd_t *pgdp, pgd;
@@ -120,7 +122,8 @@ int nbdriver_walk_get_page(struct vm_area_struct *vma, unsigned long address,
 			return -EOPNOTSUPP;
 		}
 		pfn = pud_pfn(pud) + ((address & ~PUD_MASK) >> PAGE_SHIFT);
-		ret = nbdriver_leaf_get(__pte(pud_val(pud)), pfn, true, result);
+		ret = nbdriver_leaf_get(__pte(pud_val(pud)), pfn, true, write,
+						result);
 		spin_unlock(ptl);
 		return ret;
 	}
@@ -145,7 +148,7 @@ int nbdriver_walk_get_page(struct vm_area_struct *vma, unsigned long address,
 				return -EOPNOTSUPP;
 			}
 			pfn = pmd_pfn(pmd) + ((address & ~PMD_MASK) >> PAGE_SHIFT);
-			ret = nbdriver_leaf_get(__pte(pmd_val(pmd)), pfn, true,
+			ret = nbdriver_leaf_get(__pte(pmd_val(pmd)), pfn, true, write,
 						result);
 			spin_unlock(ptl);
 			return ret;
@@ -162,7 +165,7 @@ int nbdriver_walk_get_page(struct vm_area_struct *vma, unsigned long address,
 		if (!pte_present(pte))
 			ret = -ENODATA;
 		else
-			ret = nbdriver_leaf_get(pte, pte_pfn(pte), false, result);
+			ret = nbdriver_leaf_get(pte, pte_pfn(pte), false, write, result);
 		pte_unmap_unlock(ptep, ptl);
 		return ret;
 	}

@@ -44,6 +44,7 @@ struct page { int refs, reserved, slab; struct page *head; };
 #define TABLE 2UL
 #define BAD 4UL
 #define PTE_USER 8UL
+#define PTE_WRITE 128UL
 #define SPECIAL 16UL
 #define DEVMAP 32UL
 #define PRESENT_INVALID 64UL
@@ -92,6 +93,7 @@ static bool direct_valid;
 #define pmd_devmap(v) (!!((v).value & DEVMAP))
 #define pte_devmap(v) (!!((v).value & DEVMAP))
 #define pte_special(v) (!!((v).value & SPECIAL))
+#define pte_write(v) (!!((v).value & PTE_WRITE))
 #define pte_valid(v) (!!((v).value & VALID))
 #define pte_pfn(v) ((v).value >> PFN_SHIFT)
 #define pmd_pfn(v) ((v).value >> PFN_SHIFT)
@@ -182,7 +184,8 @@ HARNESS = r"""
 
 static unsigned long flags(unsigned long pfn)
 {
-    return (pfn << PFN_SHIFT) | VALID | PTE_USER | PTE_ATTRINDX(MT_NORMAL);
+    return (pfn << PFN_SHIFT) | VALID | PTE_USER | PTE_WRITE |
+           PTE_ATTRINDX(MT_NORMAL);
 }
 static void reset(void)
 {
@@ -201,7 +204,7 @@ static void expect(struct vm_area_struct *vma, unsigned long address,
     int ret;
     ++case_no;
     fprintf(stderr, "WALK_CASE=%u expected=%d\n", case_no, error);
-    ret = nbdriver_walk_get_page(vma, address, &result);
+    ret = nbdriver_walk_get_page(vma, address, false, &result);
     if (ret != error || result != expected || locks || gets != (expected != NULL) ||
         (expected && compound_head(expected)->refs != 2)) {
         fprintf(stderr, "WALK_FAIL case=%u got=%d result=%p expected_result=%p locks=%d gets=%d refs=%d\n",

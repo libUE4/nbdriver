@@ -24,7 +24,10 @@
 static __typeof__(&mm_access) nbdriver_mm_access;
 typedef void (*nbdriver_icache_flush_fn_t)(unsigned long,
 						    unsigned long);
+typedef void (*nbdriver_cpu_sync_fn_t)(void);
 static nbdriver_icache_flush_fn_t nbdriver_icache_flush;
+static nbdriver_icache_flush_fn_t nbdriver_dcache_clean;
+static nbdriver_cpu_sync_fn_t nbdriver_cpu_sync;
 
 static noinline struct mm_struct *NBDRIVER_NO_CFI
 nbdriver_access_mm(struct task_struct *task)
@@ -37,8 +40,15 @@ nbdriver_flush_icache(unsigned long start, unsigned long end)
 {
 	nbdriver_icache_flush_fn_t fn = READ_ONCE(nbdriver_icache_flush);
 
-	if (fn)
+	if (fn) {
 		fn(start, end);
+		return;
+	}
+	fn = READ_ONCE(nbdriver_dcache_clean);
+	if (fn) {
+		fn(start, end);
+		READ_ONCE(nbdriver_cpu_sync)();
+	}
 }
 
 int nbdriver_read_init(void)
@@ -56,6 +66,18 @@ int nbdriver_read_init(void)
 		nbdriver_icache_flush =
 			(nbdriver_icache_flush_fn_t)
 			nbdriver_ksym_lookup("__flush_icache_range");
+	if (!nbdriver_icache_flush) {
+		nbdriver_dcache_clean =
+			(nbdriver_icache_flush_fn_t)
+			nbdriver_ksym_lookup("caches_clean_inval_pou");
+		nbdriver_cpu_sync =
+			(nbdriver_cpu_sync_fn_t)
+			nbdriver_ksym_lookup("kick_all_cpus_sync");
+		if (!nbdriver_dcache_clean || !nbdriver_cpu_sync) {
+			nbdriver_dcache_clean = NULL;
+			nbdriver_cpu_sync = NULL;
+		}
+	}
 	if (!nbdriver_mm_access) {
 		nbd_err("stage=read_init symbol=mm_access error=%d\n", -ENOENT);
 		return -ENOENT;
@@ -65,6 +87,8 @@ int nbdriver_read_init(void)
 
 void nbdriver_read_exit(void)
 {
+	nbdriver_cpu_sync = NULL;
+	nbdriver_dcache_clean = NULL;
 	nbdriver_icache_flush = NULL;
 	nbdriver_mm_access = NULL;
 }
@@ -124,7 +148,7 @@ static int nbdriver_read_target(struct nbdriver_read_request *request, u8 *bytes
 		length = min_t(size_t, request->size - request->copied,
 				   PAGE_SIZE - offset_in_page(at));
 		length = min_t(size_t, length, vma->vm_end - at);
-		ret = nbdriver_walk_get_page(vma, at, &page);
+		ret = nbdriver_walk_get_page(vma, at, false, &page);
 		if (ret)
 			break;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
@@ -215,7 +239,7 @@ static int nbdriver_write_target(struct nbdriver_write_request *request,
 		length = min_t(size_t, request->size - request->copied,
 				   PAGE_SIZE - offset_in_page(at));
 		length = min_t(size_t, length, vma->vm_end - at);
-		ret = nbdriver_walk_get_page(vma, at, &page);
+		ret = nbdriver_walk_get_page(vma, at, true, &page);
 		if (ret)
 			break;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
