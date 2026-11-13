@@ -22,6 +22,9 @@
 #include "nbdriver_walk.h"
 
 static __typeof__(&mm_access) nbdriver_mm_access;
+typedef void (*nbdriver_icache_flush_fn_t)(unsigned long,
+						    unsigned long);
+static nbdriver_icache_flush_fn_t nbdriver_icache_flush;
 
 static noinline struct mm_struct *NBDRIVER_NO_CFI
 nbdriver_access_mm(struct task_struct *task)
@@ -29,10 +32,30 @@ nbdriver_access_mm(struct task_struct *task)
 	return nbdriver_mm_access(task, PTRACE_MODE_READ_FSCREDS);
 }
 
+static noinline void NBDRIVER_NO_CFI
+nbdriver_flush_icache(unsigned long start, unsigned long end)
+{
+	nbdriver_icache_flush_fn_t fn = READ_ONCE(nbdriver_icache_flush);
+
+	if (fn)
+		fn(start, end);
+}
+
 int nbdriver_read_init(void)
 {
 	nbdriver_mm_access = (__typeof__(nbdriver_mm_access))
 		nbdriver_ksym_lookup("mm_access");
+	nbdriver_icache_flush =
+		(nbdriver_icache_flush_fn_t)
+		nbdriver_ksym_lookup("caches_clean_inval_pou");
+	if (!nbdriver_icache_flush)
+		nbdriver_icache_flush =
+			(nbdriver_icache_flush_fn_t)
+			nbdriver_ksym_lookup("flush_icache_range");
+	if (!nbdriver_icache_flush)
+		nbdriver_icache_flush =
+			(nbdriver_icache_flush_fn_t)
+			nbdriver_ksym_lookup("__flush_icache_range");
 	if (!nbdriver_mm_access) {
 		nbd_err("stage=read_init symbol=mm_access error=%d\n", -ENOENT);
 		return -ENOENT;
@@ -42,6 +65,7 @@ int nbdriver_read_init(void)
 
 void nbdriver_read_exit(void)
 {
+	nbdriver_icache_flush = NULL;
 	nbdriver_mm_access = NULL;
 }
 
@@ -180,8 +204,8 @@ static int nbdriver_write_target(struct nbdriver_write_request *request,
 			ret = -EACCES;
 			break;
 		}
-		if (vma->vm_flags & VM_EXEC) {
-			ret = -EOPNOTSUPP;
+		if ((vma->vm_flags & VM_EXEC) && !nbdriver_icache_flush) {
+			ret = -ENOSYS;
 			break;
 		}
 		if (vma->vm_flags & (VM_IO | VM_PFNMAP | VM_MIXEDMAP | VM_HUGETLB)) {
@@ -207,6 +231,8 @@ static int nbdriver_write_target(struct nbdriver_write_request *request,
 		kunmap_atomic(mapped);
 #endif
 		flush_dcache_page(page);
+		if (vma->vm_flags & VM_EXEC)
+			nbdriver_flush_icache(at, at + length);
 		set_page_dirty_lock(page);
 		nbdriver_walk_put_page(page);
 		request->copied += length;
