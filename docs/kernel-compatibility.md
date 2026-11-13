@@ -1,59 +1,30 @@
 # ARM64 Android 内核兼容策略
 
-## 结论
+当前实现使用匿名 FD + ioctl：SDK 通过带 magic 的 reboot 系统调用请求连接，`__arm64_sys_reboot` 的 kprobe 只排入 task_work；FD 分配及用户回写在正常任务上下文执行。没有 `/dev/nbdriver` 节点，也没有 syscall table 槽位改写。
 
-不承诺一个 `.ko` 可在所有 5.x/6.x 内核刷入。Android GKI 的 KMI 按 Android/LTS 分支管理；厂商回移、配置、KMI 符号表、`Module.symvers`、模块签名和设备权限都会影响模块构建或加载。采用**一份源码、按目标 KMI/设备构建、分别交付与验证**。
+## 当前依赖与失败行为
 
-本工程通信入口选用常规 misc 字符设备：模块注册 `/dev/nbdriver`，用户态 `open()` 后通过 `ioctl()` 请求 ABI 信息。它不从 `sys_call_table` 取空槽、不 hook reboot、不通过 kallsyms/kprobe 取得函数地址。匿名 FD 方案需要额外的 FD bootstrap 入口；原型的私有 syscall hook 和 reboot kprobe 不是稳定 KMI 接口，故不作为跨版本适配层。
+- 静态模块导入必须由目标 `Module.symvers` 提供；配置、CRC、页大小、编译器和签名策略必须匹配目标。
+- 初始化通过短期 kprobe 取得 kallsyms resolver，再解析 task_work_add、mm_access 和 ptrace_may_access。它们不全部属于稳定 KMI；符号不存在或探针被禁止时，模块明确返回初始化错误。
+- 内存补页、FP/线程环境、FD 元数据和 KGSL 是有条件的能力；检查 GET_ABI，并处理请求返回的 EOPNOTSUPP、EAGAIN 等错误。
+- 不改写全局内核 CFI slowpath。动态调用使用目标头文件的准确原型及局部调用点处理，回调保留 CFI 类型元数据。
+- FD task_work 的 ARM64 回调恢复原始栈帧/LR 后跳转到内核 module_put，释放最后引用后没有模块内返回指令。CI 使用 `tools/check_callback_tail.py` 检查实际 ELF，包括 LTO 工件。
+- PID/TID 输入输出均按调用者 PID 命名空间解释；devpts 自动发现两个完整包名，用 PID 对象和 mm 身份匹配；退出重启可重新绑定，PID 复用/exec 不继承旧状态。加载阶段必须安装两个 security_inode_* 探针，失败则回滚并返回初始化错误。
 
-misc 字符设备减少了对 syscall 内部实现的依赖，但它**不自动保证** `misc_register` 在某一目标的模块 KMI 中可用。应使用该目标的 DDK、配置、符号版本表和 KMI 符号列表构建核实；不得把一条 AOSP 分支列表外推到所有厂商内核。
+## 验证范围
 
-## 目标矩阵
+[2026-11-14 修复记录](audit-fixes-20261114.md) 与对应产物 JSON 绑定当前修复的源码哈希。旧 misc 模块、旧匿名 FD 模块或历史 8 KMI 构建的结果，只适用于它们各自的版本。
 
-下面是准备覆盖的代表性 Android common KMI 基线，不是全部 Linux 5.x/6.x 厂商内核列表。
+本地可用的完整 DDK 是 android15-6.6。本轮本地构建/模拟测试不能替代其他 KMI 的构建和设备运行结果。仓库 CI 保留 android12-5.10、android13-5.10、android13-5.15、android14-5.15、android14-6.1、android15-6.6、android16-6.12、android17-6.18 八个代表性目标，先执行主机检查，再分别构建与校验符号和回调尾转移。
 
-| Android common KMI | 当前证据 | 模块构建/加载/调用状态 |
-|---|---|---|
-| `android12-5.10` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
-| `android13-5.15` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
-| `android14-6.1` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
-| `android15-6.6` | 远程 DDK 构建通过；原件在当前 PKR110 厂商 6.6.30 上通过加载、ABI/错误返回及卸载/重新加载 | 该设备通信验证通过；其他设备未验证 |
-| `android16-6.12` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
-| `android17-6.18` | 对应远程 DDK 编译、modpost、链接成功；已核验下载产物 | 构建通过；加载/调用未验证 |
+一个代表性分支构建通过，不能证明所有 5.x/6.x 厂商固件接受同一 `.ko`；5.4 等不在该矩阵内的分支也不能按矩阵结果报告支持。
 
-本轮构建任务、实际 vermagic、源码提交与下载哈希见 [远程编译记录](remote-build.md)。日志没有编译或 modpost warning/error，但该结果仅说明对应 DDK 接受本模块，不取代设备 KMI/签名/SELinux 和实机调用验证。
+## 目标适配流程
 
-`android13-5.10` 的 `abi_gki_aarch64_generic` 文件确认包含 `misc_register` 和 `misc_deregister`；这不是 `android12-5.10`、其他 KMI 或任意厂商模块符号清单的证据。[该 GKI 符号列表](https://android.googlesource.com/kernel/common/+/refs/heads/android13-5.10/android/abi_gki_aarch64_generic)
+1. 记录设备身份、Android/KMI 分支、架构、配置、内核签名策略及正确的 Module.symvers。
+2. 用匹配的目标构建目录编译，运行严格 modpost、静态导入检查及 ELF 回调检查。
+3. 保存源码/模块哈希、编译器、vermagic 和日志。静态符号检查不校验设备签名，也看不到 kallsyms 动态调用的实际 ABI。
+4. 在可恢复测试设备验证加载、ABI、权限拒绝、读写/查询、错误回收及普通卸载。并发卸载、旧 CFI、LOCKDEP/KASAN 等分别记录实际测试范围。
+5. 按明确测试过的设备及固件交付，保持原模块与恢复方法；不修改 boot、签名强制策略或设备保护配置来掩盖不匹配。
 
-此前对六个 common 分支 `arch/arm64/kernel/syscall.c` 的比较及 SHA-256 已原样保存在 [历史调查归档](research/syscall-source-survey.md)。本轮没有重新下载核验这些哈希，不将它们当作本轮实测证据。`communication-sources.sha256` 记录的是工作区参考工程文件，二者不同。系统调用实现细节不再作为通信接口依赖。
-
-此前匿名 FD 原型的两个阻断点也留档如下：`nbdriver_entry_kprobe.c` 的 pre-handler 直接调用 `copy_to_user()`；Kprobes 文档说明 pre-handler 从断点 trap 路径调用，locking 文档将 `copy_to_user()` 列为可能睡眠的函数并禁止在不可睡眠上下文使用。这里是静态审查结论，不是设备上触发过的运行观察。[Kprobes 文档](https://docs.kernel.org/trace/kprobes.html)、[locking 文档](https://docs.kernel.org/kernel-hacking/locking.html)
-
-## 构建适配流程
-
-1. 对目标设备识别 Android common KMI 分支、架构、厂商构建标识、`.config`、编译器、`Module.symvers`、KMI 符号列表和模块签名策略。仅凭 `uname -r` 不足以识别全部 ABI 条件。
-2. 使用与设备匹配的 DDK/内核构建目录，分别编译 ARM64 模块。构建日志记录具体 KDIR、配置和工具链，并检查 modpost 输出中没有未解析或受保护符号。
-3. 静态核对 `misc_register`、`misc_deregister`、ioctl 所需符号是否在目标模块允许使用的 KMI 列表中且 CRC 一致。头文件里有声明、内核源码里有 `EXPORT_SYMBOL`，均不能单独证明某厂商目标允许 vendor module 使用。
-4. 生成每个目标独立命名的模块与 SHA-256 清单，例如 `nbdriver-android15-6.6.ko`。不要将一种 KMI 的产物复制标注成所有版本。
-5. QEMU 每个目标至少验证模块加载、节点创建、打开、ABI ioctl、未知 ioctl 错误、关闭及卸载；之后还要在真实目标设备验证节点权限、SELinux、签名与调用。QEMU 结果不替代真机结果。
-
-只有在实际目标都通过这些步骤后，才为这些**明确列出的**目标报告兼容。不能据此声称覆盖所有 5.x/6.x。
-
-## 本机环境观察（2026-11-12）
-
-- 已连接设备报告 ARM64、Android 15、`6.6.30-酷安姜北尘`。该设备不是可识别的上游 `android15-6.6` 构建产物，因此只能作为独立厂商目标。
-- 设备 config 可读，观察到 `CONFIG_MODULES=y`、`CONFIG_MODVERSIONS=y`、`CONFIG_MODULE_SIG=y`、`CONFIG_KPROBES=y`、`CONFIG_KALLSYMS=y`、`CONFIG_IKHEADERS=m`；未观察到 `CONFIG_MODULE_SIG_FORCE=y`。这不证明该设备接受任意模块，也不等于 DDK 或符号版本表已经取得。
-- 构建容器、QEMU ARM64 system binary 和目标 `Module.symvers` 当前未在宿主可用环境中发现。
-- 本次改用 GitHub Actions 远程 DDK 构建，六个目标全部完成编译并下载核验；宿主无需本地 DDK。6.18 初始化时出现过 runner 磁盘不足，已修复并重跑成功，详见验证记录。
-- 当前 PKR110 设备已通过普通 insmod 加载原产物，并完成实际 ioctl、错误返回、连续 FD 打开关闭、卸载和重新加载验证。当前保持加载；没有改 boot、分区或开机加载配置。详见 [设备验证记录](device-6.6.md)。
-- `android15-6.6` 产物的 vermagic 为 `6.6.127-4k-g46a034eca005-dirty`，不同于设备的 `6.6.30`；本次未修改模块或请求强制加载，设备仍接受该原件。未调查该厂商内核接受不同版本字符串的原因，不据此外推其他设备或所有 6.6 补丁版本兼容。
-
-## 依据与限制
-
-- [Android stable KMI 文档](https://source.android.com/docs/core/architecture/kernel/stable-kmi)：KMI 稳定承诺针对指定 Android/LTS 分支，而非跨所有 Linux 版本通用。
-- [Android ABI monitoring 文档](https://source.android.com/docs/core/architecture/kernel/abi-monitor)：KMI 使用符号列表及 ABI/CRC 检查；某符号在某内核实现中存在不表示任意外部模块都可引用。
-- [Android kernel modules 文档](https://source.android.com/docs/core/architecture/kernel/modules)：GKI 与 vendor 模块有不同的符号访问范围。
-- [Linux 6.6 外部模块构建文档](https://kernel.org/doc/html/v6.6/kbuild/modules.html)：外部模块需匹配目标内核构建；`modules_prepare` 本身不会生成启用 MODVERSIONS 所需的 `Module.symvers`。
-- [Android common `android13-5.10` generic ABI 符号列表](https://android.googlesource.com/kernel/common/+/refs/heads/android13-5.10/android/abi_gki_aarch64_generic)：该特定列表明确包含 misc 注册/注销符号；不能泛化为所有分支。
-
-更细的实际命令、编译输出和设备事实见 `docs/validation/latest.json`、`docs/validation/device-6.6-20261112.json` 及 `docs/validation/host-before-remote.json`。不完整的目标符号清单不在这里推断为存在或缺失；其余目标的设备侧加载和调用验证仍是后续必需项。
+历史来源与设备结果见 [远程编译记录](remote-build.md)、[旧设备记录](device-6.6.md) 和 [历史函数审计](audit-functions-and-loading-20261112.md)。

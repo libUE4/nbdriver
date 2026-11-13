@@ -60,13 +60,15 @@ static void section_finish(void)
 {
 	if (!active_section)
 		return;
-	printf("  %s：通过%d项", failures == section_failures ? "通过" : "失败",
-	       passes - section_passes);
-	if (failures != section_failures)
-		printf("，失败%d项", failures - section_failures);
-	if (skips != section_skips)
-		printf("，跳过%d项", skips - section_skips);
-	printf("\n");
+	if (failures == section_failures && skips == section_skips) {
+		if (passes == section_passes)
+			printf("  完成\n");
+		else
+			printf("  通过（%d项）\n", passes - section_passes);
+		return;
+	}
+	printf("  通过%d项，失败%d项，跳过%d项\n", passes - section_passes,
+	       failures - section_failures, skips - section_skips);
 }
 
 static void section(const char *name)

@@ -26,3 +26,39 @@ int main(void)
 
 	return (int)info.size;
 }
+
+_Static_assert(sizeof(struct nbdriver_pid_request) == 272, "PID request size");
+_Static_assert(sizeof(struct nbdriver_module_request) == 280, "module request size");
+_Static_assert(sizeof(struct nbdriver_process_identity) == 16, "identity size");
+_Static_assert(sizeof(struct nbdriver_thread_request) == 40, "thread request size");
+_Static_assert(sizeof(struct nbdriver_thread_environment) == 56, "thread env size");
+_Static_assert(sizeof(struct nbdriver_thread_signal) == 80, "signal request size");
+_Static_assert(offsetof(struct nbdriver_thread_signal, handler) == 32, "signal handler offset");
+_Static_assert(offsetof(struct nbdriver_thread_signal, sample_ns) == 72, "signal sample offset");
+_Static_assert(_IOC_NR(NBDRIVER_IOC_THREAD_SIGNAL) == 0x1d, "signal command");
+_Static_assert(_IOC_SIZE(NBDRIVER_IOC_THREAD_SIGNAL) == 80, "signal ioctl size");
+_Static_assert(_IOC_NR(NBDRIVER_IOC_VMA) == 0x1e, "VMA command");
+_Static_assert(sizeof(struct nbdriver_thread_fpstate) == 56, "thread FP size");
+_Static_assert(offsetof(struct nbdriver_thread_fpstate, fpsr) == 48, "FP offset");
+_Static_assert(sizeof(struct nbdriver_readv_entry) == 40, "readv entry size");
+_Static_assert(sizeof(struct nbdriver_readv_request) == 32, "readv request size");
+_Static_assert(offsetof(struct nbdriver_readv_entry, failed_address) == 32, "readv error address");
+_Static_assert(_IOC_SIZE(NBDRIVER_IOC_READV) == 32, "readv ioctl size");
+_Static_assert(_IOC_NR(NBDRIVER_IOC_READV) == 0x16, "readv ioctl number");
+
+_Static_assert(sizeof(struct nbdriver_maps_request) == 40, "maps size");
+_Static_assert(sizeof(struct nbdriver_mapping_request) == 64, "mapping size");
+_Static_assert(sizeof(struct nbdriver_fd_size_request) == 32, "FD size");
+_Static_assert(sizeof(struct nbdriver_gpu_object_info) == 48, "GPU payload size");
+_Static_assert(sizeof(struct nbdriver_gpu_info_request) == 88, "GPU request size");
+_Static_assert(sizeof(struct nbdriver_random_request) == 24, "random size");
+_Static_assert(offsetof(struct nbdriver_gpu_info_request, info) == 40, "GPU payload offset");
+_Static_assert(offsetof(struct nbdriver_mapping_request, flags) == 56, "mapping flags offset");
+_Static_assert(_IOC_NR(NBDRIVER_IOC_MAPS) == 0x17, "maps command");
+_Static_assert(_IOC_SIZE(NBDRIVER_IOC_GPU_INFO) == 88, "GPU ioctl size");
+
+_Static_assert(sizeof(struct nbdriver_devpts_status) == 56, "devpts status size");
+_Static_assert(offsetof(struct nbdriver_devpts_status, permission_hits) == 24, "devpts counters offset");
+_Static_assert(_IOC_SIZE(NBDRIVER_IOC_DEVPTS_STATUS) == 56, "devpts status ioctl size");
+_Static_assert(_IOC_NR(NBDRIVER_IOC_DEVPTS_STATUS) == 0x1f, "devpts status command");
+_Static_assert(_IOC_DIR(NBDRIVER_IOC_DEVPTS_STATUS) == _IOC_READ, "devpts status is read-only");

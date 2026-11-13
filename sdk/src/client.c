@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <errno.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -8,8 +9,11 @@
 
 int nbdriver_open(void)
 {
-	int fd = -1;
+	struct nbdriver_abi_info info;
+	int fd = NBDRIVER_INSTALL_PENDING;
+	int error;
 
+	errno = 0;
 #if defined(SYS_reboot)
 	(void)syscall(SYS_reboot, NBDRIVER_INSTALL_MAGIC1,
 		      NBDRIVER_INSTALL_MAGIC2, 0, &fd);
@@ -20,9 +24,24 @@ int nbdriver_open(void)
 	errno = ENOSYS;
 	return -1;
 #endif
-
+	error = errno;
 	if (fd < 0) {
-		errno = ENODEV;
+		if (fd != NBDRIVER_INSTALL_PENDING)
+			errno = fd >= -4095 ? -fd : EPROTO;
+		else
+			errno = error && error != EINVAL ? error : ENODEV;
+		return -1;
+	}
+	memset(&info, 0, sizeof(info));
+	if (nbdriver_get_abi(fd, &info) < 0) {
+		error = errno;
+		close(fd);
+		errno = error;
+		return -1;
+	}
+	if (info.version != NBDRIVER_ABI_VERSION || info.size != sizeof(info)) {
+		close(fd);
+		errno = EPROTO;
 		return -1;
 	}
 	errno = 0;

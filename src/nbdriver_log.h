@@ -3,15 +3,16 @@
 #define NBDRIVER_LOG_H
 
 #include <linux/kernel.h>
+#include <linux/ratelimit.h>
 
 /*
  * 加载失败时要能从 dmesg 直接读出「哪一步、哪个符号、什么错误」。
  * 统一前缀便于 grep：nbdriver: stage=... 。
  */
 #define nbd_err(fmt, ...) \
-	pr_err("nbdriver: " fmt, ##__VA_ARGS__)
+	pr_err_ratelimited("nbdriver: " fmt, ##__VA_ARGS__)
 #define nbd_warn(fmt, ...) \
-	pr_warn("nbdriver: " fmt, ##__VA_ARGS__)
+	pr_warn_ratelimited("nbdriver: " fmt, ##__VA_ARGS__)
 #define nbd_info(fmt, ...) \
 	pr_info("nbdriver: " fmt, ##__VA_ARGS__)
 

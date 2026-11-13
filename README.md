@@ -2,31 +2,27 @@
 
 面向 ARM64 Android 内核的驱动重写工程。
 
-当前通信入口改为匿名 FD + ioctl：reboot kprobe 只排入 task_work，FD 安装在任务上下文完成。当前 6.6 版本已远程编译并在 PKR110 实机通过加载和 ABI 通信测试；业务功能仍未迁移。
+当前通信为匿名 FD + ioctl：reboot kprobe 只排入 task_work，FD 安装在任务上下文完成。源码实现合并为三个编译单元，用户态复制 `sdk/include/nbdriver.h` 即可接入。
 
-本轮已按工作区 lsdriver 接入 CFI/KCFI 兼容层，并修正 task_work
-动态函数指针类型。崩溃证据、迁移范围与验证限制见
-[CFI/KCFI 迁移记录](docs/cfi-port-20261112.md)。
+2026-11-14 已修复审查列出的模块引用尾部竞态、全局 CFI 补丁、GPU 查询上下文、写权限、PID 重用/命名空间、argv[0] 部分读取、线程采样和诊断问题。具体实现、验证哈希与实机/其他 KMI 的状态见 [当前修复记录](docs/audit-fixes-20261114.md)；历史发现保存在 [审查报告](docs/driver-code-review-20261114.md)。
+
+功能包括进程/SO/线程查询、普通读写与批量读、maps/地址映射、FD 大小、KGSL GPU 元数据、随机字节和双包自动 devpts 过滤。各能力受目标后端和权限约束，详见 [SDK 说明](sdk/README.md)。
+
+终端过滤随模块加载自动启动，匹配 `com.tencent.tmgp.dfm` 和 `com.tencent.rmcn`，支持同时运行与重启重新绑定；SDK 仅保留只读状态查询。[本轮实现与实测](docs/devpts-auto-20261114.md)。
 
 ```text
 nbdriver/
-├── Makefile                 # 内核模块构建入口
-├── build.sh                 # 构建辅助脚本
-├── include/
-│   └── nbdriver_abi.h       # 内核与用户态共用协议
+├── include/nbdriver_abi.h       # 公共 ABI、命令和结构
+├── sdk/include/nbdriver.h       # 独立 C/C++ 单头 SDK
 ├── src/
-│   ├── Makefile             # Kbuild 对象列表
-│   ├── nbdriver_main.c      # 模块生命周期
-│   ├── nbdriver_comm.c/.h   # anon FD 与 ioctl ABI
-│   ├── nbdriver_entry.c/.h  # 安装入口生命周期
-│   └── nbdriver_entry_reboot.c # reboot probe 与 task_work
-├── sdk/
-│   ├── include/nbdriver/    # SDK 对外接口
-│   ├── src/                 # SDK 实现
-│   └── examples/            # 使用示例
-├── tests/                   # 后续功能测试
-├── docs/                    # 结构与开发说明
-└── out/                     # 本机构建产物，不提交 Git
+│   ├── nbdriver_core.c          # 生命周期、通信、读写、查询、页表
+│   ├── nbdriver_features.c      # maps、mapping、FD/GPU/random、devpts
+│   ├── nbdriver_platform.c      # ksym、CFI、入口、日志
+│   ├── *.h                      # 私有实现声明（统一 include 根）
+│   └── Makefile                 # 三个 Kbuild 对象
+├── tests/                       # 主机、SDK、设备测试
+├── docs/                        # 迁移、兼容和验证记录
+└── out/                         # 本地产物和恢复记录
 ```
 
 ## 构建
@@ -42,14 +38,8 @@ nbdriver/
 
 通信接口为匿名 FD + ioctl；共享 ABI 定义在 `include/nbdriver_abi.h`。入口比较见 [通信方式比较](docs/communication-comparison.md)，兼容策略见 `docs/kernel-compatibility.md`。
 
-GitHub Actions 的 5.10、5.15、6.1、6.6、6.12、6.18 六个 KMI 构建和 SDK/ABI 检查均已通过：[运行记录](https://github.com/libUE4/nbdriver/actions/runs/43186897551)。具体构建源码、vermagic、哈希和限制见 [远程编译记录](docs/remote-build.md)。构建通过不等于目标设备已验证。
+CI 配置覆盖八个代表性 Android KMI；当前版本的实际运行范围以修复记录和对应工件哈希为准。历史矩阵记录见 [远程构建](docs/remote-build.md)，历史设备测试见 [元数据记录](docs/maps-metadata-20261113.md)，不将它们当作当前版本的全矩阵运行证明。
 
-针对后续 `nbdriver_reboot_pre` 崩溃的 CFI 修复、8 KMI 远程编译和 6.6 实机通信验证见 [CFI 迁移与验证](docs/cfi-port-20261112.md)。其余 KMI 的新模块尚未在目标设备验证。
-
-之前 misc 版本在 PKR110 6.6.30 的验证记录见 [设备验证记录](docs/device-6.6.md)，只作为历史基线；reboot 入口版本的结果见本轮 [CFI 迁移与验证](docs/cfi-port-20261112.md)。
-
-当前代码的逐函数覆盖、实机验证与其他 KMI 的刷入风险见 [函数与加载审计](docs/audit-functions-and-loading-20261112.md)。
-
-SDK 目前只封装打开设备与查询 ABI；业务模块、调用示例和设备回归测试尚未迁移。
+用户态可直接复制 `sdk/include/nbdriver.h` 接入，采用 LinyuKernel 风格的独立 C/C++ 单头接口。新查询和批量读接口、限制及调用示例见 [SDK 说明](sdk/README.md)。
 
 新建源码采用 GPL-2.0-only；后续迁移其他来源代码时，应保留并核对原有许可与版权信息。

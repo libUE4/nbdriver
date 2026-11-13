@@ -1,6 +1,8 @@
 # 通信机制与迁移基线
 
-本记录基于工作区内的 enkernel、LinyuKernel 和 NBG-driver 源码静态阅读。未加载原项目驱动，未执行其隐藏入口，未验证原项目设备行为。当前 nbdriver 正在改为匿名 FD + ioctl：只采用 enkernel 的 task_work 延迟 FD 安装与 ARM64 wrapper 参数读取，不采用其 syscall 表改写路径。
+本文保留早期通信迁移阶段；当前驱动已有进程/线程、批量读写和元数据功能，当前状态见 [修复记录](audit-fixes-20261114.md)。
+
+本记录基于工作区内的 enkernel、LinyuKernel 和 NBG-driver 源码静态阅读。未加载原项目驱动，未执行其隐藏入口，未验证原项目设备行为。该迁移阶段把 nbdriver 改为匿名 FD + ioctl：只采用 enkernel 的 task_work 延迟 FD 安装与 ARM64 wrapper 参数读取，不采用其 syscall 表改写路径。
 
 ## enkernel
 
@@ -44,4 +46,4 @@
 5. 入口选择依据见 [communication-comparison.md](communication-comparison.md)。改动完成后必须重跑六 KMI DDK 矩阵，再对 PKR110 执行加载、ioctl 和卸载恢复验证。
 6. 后续功能按实际模块命名，并在 `src/Makefile` 显式添加对象。
 
-本阶段只切换 ABI 查询通信入口，没有迁移 NBG-driver 业务功能。
+该历史阶段只切换 ABI 查询通信入口；这不描述当前版本的功能覆盖。

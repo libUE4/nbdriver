@@ -266,6 +266,23 @@ int main(void)
     expect(&vma, 0, -EACCES, NULL);
     reset(); root_pud.value = flags(20) & ~PTE_WRITE;
     expect(&vma, 0, -EACCES, NULL);
+    {struct page *page;bool uncached;
+      reset();leaf_pte.value=(flags(7)&~PTE_ATTRINDX_MASK)|PTE_ATTRINDX(MT_NORMAL_NC)|SPECIAL;
+      assert(!nbdriver_walk_get_ram_page(&vma,0,&page,&uncached)&&page==&pages[7]&&uncached&&!locks&&gets==1);
+      nbdriver_walk_put_page(page);assert(pages[7].refs==1);
+      reset();leaf_pte.value|=SPECIAL;
+      assert(!nbdriver_walk_get_ram_page(&vma,0,&page,&uncached)&&page==&pages[7]&&!uncached);nbdriver_walk_put_page(page);
+      reset();leaf_pte.value=(flags(7)&~PTE_ATTRINDX_MASK);
+      assert(nbdriver_walk_get_ram_page(&vma,0,&page,&uncached)==-EOPNOTSUPP&&!page&&!locks&&!gets);
+      reset();leaf_pte.value|=DEVMAP;assert(nbdriver_walk_get_ram_page(&vma,0,&page,&uncached)==-EOPNOTSUPP&&!page&&!locks&&!gets);
+      reset();pages[7].reserved=1;assert(nbdriver_walk_get_ram_page(&vma,0,&page,&uncached)==-EOPNOTSUPP&&!page&&!gets);
+      reset();pages[7].slab=1;assert(nbdriver_walk_get_ram_page(&vma,0,&page,&uncached)==-EOPNOTSUPP&&!page&&!gets);
+      reset();pages[7].refs=0;assert(nbdriver_walk_get_ram_page(&vma,0,&page,&uncached)==-EAGAIN&&!page&&!locks);
+      reset();leaf_pte.value=flags(2048);assert(nbdriver_walk_get_ram_page(&vma,0,&page,&uncached)==-EFAULT&&!page&&!gets);
+      reset();leaf_pte.value&=~PTE_USER;assert(nbdriver_walk_get_ram_page(&vma,0,&page,&uncached)==-EACCES&&!page&&!gets);
+      reset();leaf_pte.value=0;assert(nbdriver_walk_get_ram_page(&vma,0,&page,&uncached)==-ENODATA&&!page&&!locks);
+      puts("PASS mapped-RAM walker: Normal-NC/cacheable special leaves, pinned refs, MMIO/devmap/reserved/slab/dead/kernel/absent rejection");
+    }
     printf("walk branches: PASS PAGE_SHIFT=%d cases=%u\n", PAGE_SHIFT, case_no);
     return 0;
 }
@@ -282,6 +299,11 @@ with tempfile.TemporaryDirectory(prefix="nbdriver-walk-") as temporary:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('#include "mock.h"\n')
     (root / "linux/errno.h").write_text('#include <asm-generic/errno.h>\n')
+    # The production walker was merged into nbdriver_core.c. Compile that
+    # exact section rather than referring to a deleted translation unit.
+    merged = (PROJECT / "src/nbdriver_core.c").read_text()
+    walker = merged.split("/* ===== BEGIN src/core/nbdriver_walk.c ===== */", 1)[1].split("/* ===== END src/core/nbdriver_walk.c ===== */", 1)[0]
+    (root / "nbdriver_walk.c").write_text(walker)
     harness = root / "test.c"
     harness.write_text(HARNESS)
     for shift in (12, 14, 16):

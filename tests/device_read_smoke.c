@@ -159,6 +159,28 @@ int main(void)
 	check(nbdriver_read_process(fd, &request) == -1 && errno == EINVAL,
 	      "length_limit");
 
+	/* Disposable self-owned pages reproduce DFM's -w-p descriptor VMA. */
+	{
+		uint8_t expected[16];
+		struct nbdriver_mapping_request mapping;
+		memcpy(expected, source, sizeof(expected));
+		if (mprotect(source, page_size, PROT_WRITE))
+			return 1;
+		request = request_for(source, destination, sizeof(expected));
+		result = nbdriver_read_process(fd, &request);
+		check(!result && !request.error && request.copied == sizeof(expected) &&
+		      !memcmp(destination, expected, sizeof(expected)), "write_only_vma_read");
+		memset(&mapping, 0, sizeof(mapping));
+		mapping.pid = getpid();mapping.address = (uintptr_t)source;
+		mapping.expected_start_ns = request.expected_start_ns;
+		result = ioctl(fd, NBDRIVER_IOC_MAPPING, &mapping);
+		check(!result && (mapping.flags & (NBDRIVER_MAPPING_READ | NBDRIVER_MAPPING_WRITE)) ==
+		      (NBDRIVER_MAPPING_READ | NBDRIVER_MAPPING_WRITE), "write_only_effective_mapping");
+		if (mprotect(source, page_size, PROT_READ | PROT_WRITE))
+			return 1;
+		check(!memcmp(source, expected, sizeof(expected)), "write_only_source_unchanged");
+	}
+
 	if (mprotect(source + page_size, page_size, PROT_NONE))
 		return 1;
 	memset(destination, 0xcc, 40);

@@ -10,7 +10,7 @@
 | LinyuKernel | reboot kprobe | 在 kprobe pre-handler 直接分配 FD、创建 anon inode、安装 FD 并改写 PC | kprobe、anon inode/FD helper、reboot wrapper 布局 | 对 `__arm64_sys_reboot` 探针时 `regs->regs[0]` 是 wrapper 收到的寄存器结构指针；当前 handler 却直接拿它作为 magic。并且 pre-handler 内执行可能睡眠的文件/FD 分配 |
 | nbdriver 当前选择 | reboot kprobe 作为握手入口，SDK 仍以 ioctl 操作 anon FD | 只在 pre-handler 解码 magic 并排入 `task_work`；任务回调才分配 FD 和回写用户内存 | kprobe、task_work、anon inode/FD helpers | 避开 syscall table 改写，但仍依赖内核探针、wrapper ABI 与具体 KMI 导出；必须按目标 DDK 编译和实机测试 |
 
-证据位置：enkernel `main.c` 约 136–229 行和 `syscall.c` 约 187–260 行；LinyuKernel `LingYuKernel/src/entry.c` 约 94–127 行；当前实现位于 `src/nbdriver_entry_reboot.c` 和 `src/nbdriver_comm.c`。
+证据位置：enkernel `main.c` 约 136–229 行和 `syscall.c` 约 187–260 行；LinyuKernel `LingYuKernel/src/entry.c` 约 94–127 行；当前实现位于 `src/nbdriver_platform.c（entry_reboot 段）` 和 `src/nbdriver_core.c（comm 段）`。
 
 Linux Kprobes 文档说明 pre-handler 是由断点 trap 路径调用；Linux locking 文档把 `copy_to_user()`、`kmalloc(GFP_KERNEL)` 等列为可能睡眠操作，并禁止在不可睡眠上下文执行。因此 LinyuKernel 直接在 probe callback 内创建 FD 的路径需要单独处理上下文风险。[Kprobes](https://docs.kernel.org/trace/kprobes.html)、[Locking](https://docs.kernel.org/kernel-hacking/locking.html)
 
