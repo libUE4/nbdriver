@@ -8,6 +8,8 @@
 #include <linux/sched/mm.h>
 #include <linux/sched/task.h>
 #include <linux/slab.h>
+#include <linux/version.h>
+#include <linux/highmem.h>
 #include <linux/uaccess.h>
 
 #include <asm/memory.h>
@@ -20,8 +22,6 @@
 #include "nbdriver_walk.h"
 
 static __typeof__(&mm_access) nbdriver_mm_access;
-typedef __typeof__(&access_remote_vm) nbdriver_access_remote_vm_fn_t;
-static nbdriver_access_remote_vm_fn_t nbdriver_access_remote_vm;
 
 static noinline struct mm_struct *NBDRIVER_NO_CFI
 nbdriver_access_mm(struct task_struct *task)
@@ -33,13 +33,6 @@ int nbdriver_read_init(void)
 {
 	nbdriver_mm_access = (__typeof__(nbdriver_mm_access))
 		nbdriver_ksym_lookup("mm_access");
-	nbdriver_access_remote_vm =
-		(nbdriver_access_remote_vm_fn_t)
-		nbdriver_ksym_lookup("access_remote_vm");
-	if (!nbdriver_access_remote_vm) {
-		nbd_err("stage=read_init symbol=access_remote_vm error=%d\n", -ENOENT);
-		return -ENOENT;
-	}
 	if (!nbdriver_mm_access) {
 		nbd_err("stage=read_init symbol=mm_access error=%d\n", -ENOENT);
 		return -ENOENT;
@@ -49,7 +42,6 @@ int nbdriver_read_init(void)
 
 void nbdriver_read_exit(void)
 {
-	nbdriver_access_remote_vm = NULL;
 	nbdriver_mm_access = NULL;
 }
 
@@ -111,15 +103,24 @@ static int nbdriver_read_target(struct nbdriver_read_request *request, u8 *bytes
 		ret = nbdriver_walk_get_page(vma, at, &page);
 		if (ret)
 			break;
-		nbdriver_walk_put_page(page);
-		ret = nbdriver_access_remote_vm(mm, at,
-					bytes + request->copied, length, 0);
-		if (ret != (int)length) {
-			if (ret >= 0)
-				ret = -EFAULT;
-			break;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+		{
+			void *mapped = kmap_local_page(page);
+
+			memcpy(bytes + request->copied,
+			       (u8 *)mapped + offset_in_page(at), length);
+			kunmap_local(mapped);
 		}
-		ret = 0;
+#else
+		{
+			void *mapped = kmap_atomic(page);
+
+			memcpy(bytes + request->copied,
+			       (u8 *)mapped + offset_in_page(at), length);
+			kunmap_atomic(mapped);
+		}
+#endif
+		nbdriver_walk_put_page(page);
 		request->copied += length;
 	}
 	mmap_read_unlock(mm);
@@ -145,8 +146,8 @@ long nbdriver_read_ioctl(unsigned long argument)
 	if (request.pid <= 0 || !request.size || request.size > NBDRIVER_READ_MAX ||
 	    !request.buffer || request.copied || request.error || request.failed_address)
 		return -EINVAL;
-	if (request.address >= TASK_SIZE_64 ||
-	    request.size > TASK_SIZE_64 - request.address)
+	if (!request.address ||
+	    request.size > ULONG_MAX - (unsigned long)request.address)
 		return -EINVAL;
 	destination = u64_to_user_ptr(request.buffer);
 	if (!access_ok(destination, request.size))

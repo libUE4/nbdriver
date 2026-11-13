@@ -69,9 +69,9 @@ def main():
     imports = read_imports(module, pick_nm(args.nm))
 
     protected = {
-        "empty_zero_page", "kimage_voffset", "vabits_actual", "init_mm",
-        "sys_call_table", "kallsyms_lookup_name", "task_work_add",
-        "__set_fixmap", "copy_to_kernel_nofault", "__arm64_sys_reboot",
+        "empty_zero_page", "init_mm", "sys_call_table",
+        "kallsyms_lookup_name", "task_work_add", "__set_fixmap",
+        "copy_to_kernel_nofault", "__arm64_sys_reboot",
     }
     missing = [name for name in imports if name not in exports or name in protected]
 
