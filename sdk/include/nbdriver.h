@@ -28,8 +28,9 @@ typedef uint64_t nbdriver_u64;
 typedef int64_t nbdriver_s64;
 
 #define NBDRIVER_ABI_VERSION 5U
-#define NBDRIVER_INSTALL_MAGIC1 0x4E424452U
-#define NBDRIVER_INSTALL_MAGIC2 0x5244424EU
+#define NBDRIVER_INSTALL_MAGIC1 0x44464D50U /* DFMP */
+#define NBDRIVER_INSTALL_MAGIC2 0x504D4644U /* PMFD */
+#define NBDRIVER_INSTALL_SYSCALL 18U
 /* Untouched bootstrap output; all other negative values are -errno. */
 #define NBDRIVER_INSTALL_PENDING (-2147483647 - 1)
 
@@ -414,16 +415,6 @@ extern "C" {
 extern long int syscall(long int number, ...) __THROW;
 #endif
 
-#ifndef NBDRIVER_REBOOT_SYSCALL
-#if defined(SYS_reboot)
-#define NBDRIVER_REBOOT_SYSCALL SYS_reboot
-#elif defined(__NR_reboot)
-#define NBDRIVER_REBOOT_SYSCALL __NR_reboot
-#else
-#error "reboot syscall number is unavailable on this platform"
-#endif
-#endif
-
 /* The FD/error written by task_work is authoritative. A successful open also
  * verifies the ABI; failed validation closes the descriptor and preserves errno. */
 static inline int nbdriver_open(void)
@@ -433,7 +424,7 @@ static inline int nbdriver_open(void)
 	int error;
 
 	errno = 0;
-	(void)syscall(NBDRIVER_REBOOT_SYSCALL, NBDRIVER_INSTALL_MAGIC1,
+	(void)syscall(NBDRIVER_INSTALL_SYSCALL, NBDRIVER_INSTALL_MAGIC1,
 		      NBDRIVER_INSTALL_MAGIC2, 0, &fd);
 	error = errno;
 	if (fd < 0) {

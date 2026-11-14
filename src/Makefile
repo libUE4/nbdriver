@@ -3,7 +3,8 @@ obj-m := nbdriver.o
 nbdriver-y := nbdriver_core.o \
               nbdriver_features.o \
               nbdriver_runtime.o \
-              nbdriver_platform.o
+              nbdriver_platform.o \
+              nbdriver_sf_groups.o
 
 # Shared protocol plus the single private-header include root.
 ccflags-y += -I$(src)/../include -I$(src)

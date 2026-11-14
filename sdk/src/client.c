@@ -16,16 +16,8 @@ int nbdriver_open(void)
 	int error;
 
 	errno = 0;
-#if defined(SYS_reboot)
-	(void)syscall(SYS_reboot, NBDRIVER_INSTALL_MAGIC1,
+	(void)syscall(NBDRIVER_INSTALL_SYSCALL, NBDRIVER_INSTALL_MAGIC1,
 		      NBDRIVER_INSTALL_MAGIC2, 0, &fd);
-#elif defined(__NR_reboot)
-	(void)syscall(__NR_reboot, NBDRIVER_INSTALL_MAGIC1,
-		      NBDRIVER_INSTALL_MAGIC2, 0, &fd);
-#else
-	errno = ENOSYS;
-	return -1;
-#endif
 	error = errno;
 	if (fd < 0) {
 		if (fd != NBDRIVER_INSTALL_PENDING)

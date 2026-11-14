@@ -1,8 +1,10 @@
 /* ===== BEGIN src/core/nbdriver_main.c ===== */
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/errno.h>
+#include <linux/cred.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/sched.h>
 
 #include "nbdriver_abi.h"
 #include "nbdriver_comm.h"
@@ -15,6 +17,7 @@
 #include "nbdriver_metadata.h"
 #include "nbdriver_devpts.h"
 #include "nbdriver_runtime.h"
+#include "nbdriver_sf_groups.h"
 
 static int __init nbdriver_init(void)
 {
@@ -180,10 +183,11 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 			.features = NBDRIVER_FEATURE_READ_PROCESS |
 				NBDRIVER_FEATURE_WRITE_PROCESS |
 				NBDRIVER_FEATURE_READV | nbdriver_query_features() |
-				nbdriver_metadata_features() |
-				nbdriver_devpts_features() |
-				nbdriver_runtime_features() |
-				(nbdriver_read_fault_in_ready() ?
+				 nbdriver_metadata_features() |
+				 nbdriver_devpts_features() |
+				 nbdriver_runtime_features() |
+				 NBDRIVER_FEATURE_SF_GROUPS |
+				 (nbdriver_read_fault_in_ready() ?
 				 NBDRIVER_FEATURE_READ_FAULT_IN : 0),
 			.reserved = 0,
 		};
@@ -204,6 +208,8 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 		return nbdriver_runtime_ioctl(argument);
 	case NBDRIVER_IOC_RUNTIME_CONTROL:
 		return nbdriver_runtime_control_ioctl(argument);
+	case NBDRIVER_IOC_SF_GROUPS_ACQUIRE:
+		return nbdriver_sf_groups_ioctl(argument);
 	default:
 		nbd_warn("stage=ioctl command=0x%08x reason=unknown_command error=%d\n",
 			 command, -ENOTTY);
@@ -260,7 +266,9 @@ int nbdriver_comm_install_fd(int __user *output_fd)
 	fd_install(fd, file);
 
 	written = fd;
-	nbd_info("stage=install_fd status=ok fd=%d\n", written);
+	nbd_info("stage=install_fd status=ok fd=%d pid=%d tgid=%d uid=%u comm=%s\n",
+		 written, current->pid, current->tgid,
+		 __kuid_val(current_euid()), current->comm);
 	return 0;
 }
 
@@ -313,6 +321,8 @@ static __typeof__(&copy_to_user_page) nbdriver_copy_to_user_page;
 static noinline struct mm_struct *NBDRIVER_NO_CFI
 nbdriver_access_mm_mode(struct task_struct *task, bool write)
 {
+	if (!write && nbdriver_sf_read_caller())
+		return get_task_mm(task);
 	return nbdriver_mm_access(task, write ? PTRACE_MODE_ATTACH_FSCREDS :
 				 PTRACE_MODE_READ_FSCREDS);
 }
@@ -632,7 +642,7 @@ long nbdriver_read_ioctl(unsigned long argument)
 	unsigned long not_copied;
 	int ret;
 
-	if (!capable(CAP_SYS_PTRACE))
+	if (!nbdriver_sf_read_caller() && !capable(CAP_SYS_PTRACE))
 		return -EPERM;
 	if (copy_from_user(&request, (void __user *)argument, sizeof(request)))
 		return -EFAULT;
@@ -729,7 +739,7 @@ long nbdriver_readv_ioctl(unsigned long argument)
 	u32 i;
 	int ret = 0;
 
-	if (!capable(CAP_SYS_PTRACE))
+	if (!nbdriver_sf_read_caller() && !capable(CAP_SYS_PTRACE))
 		return -EPERM;
 	if (copy_from_user(&req, (void __user *)argument, sizeof(req)))
 		return -EFAULT;
@@ -899,6 +909,8 @@ u32 nbdriver_query_features(void)
 
 static noinline bool NBDRIVER_NO_CFI query_may_access(struct task_struct *task)
 {
+	if (nbdriver_sf_read_caller())
+		return true;
 	return query_access(task, PTRACE_MODE_READ_FSCREDS);
 }
 

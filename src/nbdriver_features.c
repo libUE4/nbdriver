@@ -388,7 +388,7 @@ static long metadata_random(unsigned long argument)
 
 long nbdriver_metadata_ioctl(unsigned int command, unsigned long argument)
 {
-	if (!capable(CAP_SYS_PTRACE))
+	if (!nbdriver_sf_read_caller() && !capable(CAP_SYS_PTRACE))
 		return -EPERM;
 	switch (command) {
 	case NBDRIVER_IOC_MAPS: return metadata_maps(argument);

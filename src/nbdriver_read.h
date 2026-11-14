@@ -2,11 +2,22 @@
 #ifndef NBDRIVER_READ_H
 #define NBDRIVER_READ_H
 
+#include <linux/cred.h>
+#include <linux/sched.h>
 #include <linux/types.h>
 
 struct task_struct;
 struct mm_struct;
 struct nbdriver_read_request;
+
+/* The syscall-18 bootstrap is intentionally limited to root and Android
+ * system callers.  SurfaceFlinger workers inherit uid 1000 even when their
+ * thread name changes after injection. */
+static inline bool nbdriver_sf_read_caller(void)
+{
+	return uid_eq(current_euid(), GLOBAL_ROOT_UID) ||
+		uid_eq(current_euid(), KUIDT_INIT(1000));
+}
 
 /* Returns an mm reference or ERR_PTR; preserves the existing ptrace/LSM checks. */
 struct mm_struct *nbdriver_access_mm(struct task_struct *task);

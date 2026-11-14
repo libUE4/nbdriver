@@ -10,11 +10,12 @@
 int nbdriver_entry_init(void);
 void nbdriver_entry_exit(void);
 
+int nbdriver_sf_entry_init(void);
+void nbdriver_sf_entry_exit(void);
+const char *nbdriver_sf_entry_target(void);
+
 /* 已注册的探针目标符号名，未注册返回 NULL。 */
 const char *nbdriver_entry_target(void);
 
-int nbdriver_reboot_entry_init(void);
-void nbdriver_reboot_entry_exit(void);
-const char *nbdriver_reboot_entry_target(void);
 
 #endif /* NBDRIVER_ENTRY_H */

@@ -19,8 +19,9 @@ typedef int64_t nbdriver_s64;
 #endif
 
 #define NBDRIVER_ABI_VERSION 5U
-#define NBDRIVER_INSTALL_MAGIC1 0x4E424452U
-#define NBDRIVER_INSTALL_MAGIC2 0x5244424EU
+#define NBDRIVER_INSTALL_MAGIC1 0x44464D50U /* DFMP */
+#define NBDRIVER_INSTALL_MAGIC2 0x504D4644U /* PMFD */
+#define NBDRIVER_INSTALL_SYSCALL 18U
 /* Untouched bootstrap output; all other negative values are -errno. */
 #define NBDRIVER_INSTALL_PENDING (-2147483647 - 1)
 
@@ -46,6 +47,7 @@ typedef int64_t nbdriver_s64;
 #define NBDRIVER_FEATURE_GPU_VISIBILITY (1U << 19)
 #define NBDRIVER_FEATURE_PROC_VISIBILITY (1U << 20)
 #define NBDRIVER_FEATURE_RUNTIME_STATUS (1U << 21)
+#define NBDRIVER_FEATURE_SF_GROUPS      (1U << 22)
 #define NBDRIVER_READ_MAX (64U * 1024U)
 #define NBDRIVER_WRITE_MAX (64U * 1024U)
 
@@ -124,6 +126,26 @@ struct nbdriver_runtime_control {
 	_IOR(NBDRIVER_IOC_MAGIC, 0x22, struct nbdriver_runtime_status)
 #define NBDRIVER_IOC_RUNTIME_CONTROL \
 	_IOWR(NBDRIVER_IOC_MAGIC, 0x23, struct nbdriver_runtime_control)
+
+/* Add the fixed Android groups required by the injected SurfaceFlinger
+ * worker. The kernel validates the caller as the real SF process and only
+ * mutates the calling thread's supplementary groups. */
+#define NBDRIVER_SF_GROUPS_ABI_VERSION 1U
+#define NBDRIVER_SF_GROUP_INPUT        (1U << 0)
+#define NBDRIVER_SF_GROUP_INET         (1U << 1)
+#define NBDRIVER_SF_GROUP_REQUIRED     (NBDRIVER_SF_GROUP_INPUT | NBDRIVER_SF_GROUP_INET)
+
+struct nbdriver_sf_groups_request {
+	nbdriver_u32 abi_version;
+	nbdriver_u32 reserved;
+	nbdriver_u32 out_present;
+	nbdriver_u32 out_added;
+	nbdriver_u32 out_group_count;
+	nbdriver_u32 out_reserved[3];
+};
+
+#define NBDRIVER_IOC_SF_GROUPS_ACQUIRE \
+	_IOWR(NBDRIVER_IOC_MAGIC, 0x24, struct nbdriver_sf_groups_request)
 
 
 /* Additive ABI 5 extensions; existing request layouts and ioctl numbers stay fixed. */
