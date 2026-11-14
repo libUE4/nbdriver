@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
+#define _GNU_SOURCE
 #include <errno.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "nbdriver/client.h"
@@ -56,6 +58,55 @@ int nbdriver_get_abi(int fd, struct nbdriver_abi_info *info)
 	}
 
 	return ioctl(fd, NBDRIVER_IOC_GET_ABI, info);
+}
+
+int nbdriver_get_runtime_status(int fd, struct nbdriver_runtime_status *status)
+{
+	if (fd < 0 || !status) {
+		errno = EINVAL;
+		return -1;
+	}
+	memset(status, 0, sizeof(*status));
+	return ioctl(fd, NBDRIVER_IOC_RUNTIME_STATUS, status);
+}
+
+int nbdriver_runtime_control(int fd, struct nbdriver_runtime_control *control)
+{
+	if (fd < 0 || !control) {
+		errno = EINVAL;
+		return -1;
+	}
+	return ioctl(fd, NBDRIVER_IOC_RUNTIME_CONTROL, control);
+}
+
+int nbdriver_load_module_path(const char *path, const char *parameters)
+{
+	int module_fd;
+	long ret;
+
+	if (!path) {
+		errno = EINVAL;
+		return -1;
+	}
+	module_fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (module_fd < 0)
+		return -1;
+#if defined(SYS_finit_module)
+	ret = syscall(SYS_finit_module, module_fd,
+		      parameters ? parameters : "", 0UL);
+#elif defined(__NR_finit_module)
+	ret = syscall(__NR_finit_module, module_fd,
+		      parameters ? parameters : "", 0UL);
+#else
+	ret = -1;
+	errno = ENOSYS;
+#endif
+	{
+		int saved = errno;
+		close(module_fd);
+		errno = saved;
+	}
+	return (int)ret;
 }
 
 int nbdriver_read_process(int fd, struct nbdriver_read_request *request)

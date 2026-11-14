@@ -5,6 +5,8 @@ import os,re,subprocess,tempfile
 root=Path(__file__).resolve().parents[1]
 s=(root/'src/nbdriver_features.c').read_text()
 s=s[s.index('/* ===== BEGIN src/features/nbdriver_devpts.c ===== */'):]
+end=s.index('/* ===== END src/features/nbdriver_devpts.c ===== */')
+s=s[:end]
 s=re.sub(r'^#include[^\n]*\n','',s,flags=re.M)
 with tempfile.TemporaryDirectory(prefix='nbdriver-auto-') as name:
     temp=Path(name)

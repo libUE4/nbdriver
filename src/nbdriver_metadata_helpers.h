@@ -54,11 +54,4 @@ static inline int nbdriver_maps_escape(char *out, size_t capacity, const char *n
 	return 0;
 }
 
-/* Retain the known implementation profile from NBG-driver. Other vendor
- * builds need a separately verified profile, not a guessed private layout. */
-static inline int nbdriver_kgsl_profile_matches(const nbdriver_u32 code[7])
-{
-	return code[0] == 0xd503233fU && code[4] == 0xb9402841U &&
-		code[6] == 0xf9400400U;
-}
 #endif

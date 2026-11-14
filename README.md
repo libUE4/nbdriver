@@ -2,7 +2,7 @@
 
 面向 ARM64 Android 内核的驱动重写工程。
 
-当前通信为匿名 FD + ioctl：reboot kprobe 只排入 task_work，FD 安装在任务上下文完成。源码实现合并为三个编译单元，用户态复制 `sdk/include/nbdriver.h` 即可接入。
+当前通信为匿名 FD + ioctl：reboot kprobe 只排入 task_work，FD 安装在任务上下文完成。源码实现包含统一 ABI、运行状态握手和原生刷入器；用户态复制 `sdk/include/nbdriver.h` 即可接入。
 
 2026-11-14 已修复审查列出的模块引用尾部竞态、全局 CFI 补丁、GPU 查询上下文、写权限、PID 重用/命名空间、argv[0] 部分读取、线程采样和诊断问题。具体实现、验证哈希与实机/其他 KMI 的状态见 [当前修复记录](docs/audit-fixes-20261114.md)；历史发现保存在 [审查报告](docs/driver-code-review-20261114.md)。
 
@@ -17,9 +17,11 @@ nbdriver/
 ├── src/
 │   ├── nbdriver_core.c          # 生命周期、通信、读写、查询、页表
 │   ├── nbdriver_features.c      # maps、mapping、FD/GPU/random、devpts
+│   ├── nbdriver_runtime.c       # ready/resident/handle/token 状态
 │   ├── nbdriver_platform.c      # ksym、CFI、入口、日志
 │   ├── *.h                      # 私有实现声明（统一 include 根）
 │   └── Makefile                 # 三个 Kbuild 对象
+├── tools/nbdriver_loader.c      # 原生兼容预检与 finit_module 刷入器
 ├── tests/                       # 主机、SDK、设备测试
 ├── docs/                        # 迁移、兼容和验证记录
 └── out/                         # 本地产物和恢复记录
@@ -35,6 +37,14 @@ nbdriver/
 ```
 
 默认参数为 `ARCH=arm64 LLVM=1 LLVM_IAS=1`，可通过 make 参数覆盖。构建成功后模块保存到 `out/nbdriver.ko`。
+
+构建原生刷入器：
+
+```sh
+make -C nbdriver loader
+```
+
+刷入器会检查 root、内核版本前缀、必需 kallsyms 名称和 ko SHA256，随后调用 `finit_module`，再通过匿名 FD 查询 ABI 与 runtime ready 状态；失败不会伪造加载成功。具体日志格式见 [兼容刷入链路](docs/kernel-compatibility-loader.md)。
 
 通信接口为匿名 FD + ioctl；共享 ABI 定义在 `include/nbdriver_abi.h`。入口比较见 [通信方式比较](docs/communication-comparison.md)，兼容策略见 `docs/kernel-compatibility.md`。
 

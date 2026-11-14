@@ -222,6 +222,9 @@ def main():
                           'NBDRIVER_IOC_THREAD_SIGNAL', 'NBDRIVER_IOC_VMA',
                           'NBDRIVER_FEATURE_READV', 'NBDRIVER_FEATURE_MAPS',
                           'NBDRIVER_FEATURE_MAPPING', 'NBDRIVER_FEATURE_FD_SIZE',
+                          'NBDRIVER_FEATURE_GPU_SYNC', 'NBDRIVER_FEATURE_GPU_VISIBILITY',
+                          'NBDRIVER_IOC_GPU_SYNC', 'NBDRIVER_IOC_GPU_VISIBILITY',
+                          'NBDRIVER_GPU_SYNC_MAX_ID', 'NBDRIVER_GPU_SYNC_WORDS',
                           'NBDRIVER_FEATURE_GPU_INFO', 'NBDRIVER_FEATURE_RANDOM',
                           'NBDRIVER_IOC_MAPS', 'NBDRIVER_IOC_MAPPING', 'NBDRIVER_IOC_FD_SIZE',
                           'NBDRIVER_IOC_GPU_INFO', 'NBDRIVER_IOC_RANDOM', 'NBDRIVER_MAPS_MAX',
@@ -240,7 +243,7 @@ def main():
                           'nbdriver_readv_entry', 'nbdriver_readv_request',
                           'nbdriver_maps_request', 'nbdriver_mapping_request',
                           'nbdriver_fd_size_request', 'nbdriver_gpu_object_info',
-                          'nbdriver_gpu_info_request', 'nbdriver_random_request', 'nbdriver_devpts_status']:
+                          'nbdriver_gpu_info_request', 'nbdriver_gpu_sync_request', 'nbdriver_gpu_visibility_request', 'nbdriver_random_request', 'nbdriver_devpts_status']:
                 expression += f'printf("%zu ", sizeof(struct {value}));'
             for structure, fields in {
                 'nbdriver_pid_request': ['pid', 'start_ns'],
@@ -255,6 +258,8 @@ def main():
                 'nbdriver_mapping_request': ['address', 'expected_start_ns', 'physical', 'page_size', 'vma_start', 'vma_end', 'flags', 'reserved2'],
                 'nbdriver_fd_size_request': ['target_fd', 'expected_start_ns', 'size', 'error', 'reserved'],
                 'nbdriver_gpu_object_info': ['flags', 'size', 'virtual_length', 'virtual_address', 'id', 'reserved'],
+                'nbdriver_gpu_sync_request': ['expected_start_ns', 'max_id', 'first_free', 'backend', 'error', 'sample_ns', 'occupied'],
+                'nbdriver_gpu_visibility_request': ['operation', 'expected_start_ns', 'hidden', 'directory_hits', 'access_hits', 'missed'],
                 'nbdriver_gpu_info_request': ['object_id', 'expected_start_ns', 'result', 'sample_ns', 'info'],
                 'nbdriver_random_request': ['size', 'copied', 'error', 'reserved'],
                 'nbdriver_devpts_status': ['size', 'active', 'max_index', 'target_count', 'pids', 'permission_hits', 'getattr_hits', 'generation', 'last_error', 'reserved'],

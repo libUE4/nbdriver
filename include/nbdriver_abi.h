@@ -42,6 +42,10 @@ typedef int64_t nbdriver_s64;
 #define NBDRIVER_FEATURE_DEVPTS       (1U << 15)
 #define NBDRIVER_FEATURE_THREAD_SIGNAL (1U << 16)
 #define NBDRIVER_FEATURE_VMA           (1U << 17)
+#define NBDRIVER_FEATURE_GPU_SYNC       (1U << 18)
+#define NBDRIVER_FEATURE_GPU_VISIBILITY (1U << 19)
+#define NBDRIVER_FEATURE_PROC_VISIBILITY (1U << 20)
+#define NBDRIVER_FEATURE_RUNTIME_STATUS (1U << 21)
 #define NBDRIVER_READ_MAX (64U * 1024U)
 #define NBDRIVER_WRITE_MAX (64U * 1024U)
 
@@ -74,6 +78,40 @@ struct nbdriver_abi_info {
 	nbdriver_u32 reserved;
 };
 
+/* Loader/runtime handshake.  This is deliberately additive and read-only:
+ * the kernel owns the handle/token and the client only verifies readiness. */
+#define NBDRIVER_RUNTIME_READY    (1U << 0)
+#define NBDRIVER_RUNTIME_RESIDENT (1U << 1)
+#define NBDRIVER_RUNTIME_PROBES  (1U << 2)
+#define NBDRIVER_RUNTIME_QUIESCED (1U << 3)
+#define NBDRIVER_RUNTIME_CONTROL_QUIESCE 1U
+#define NBDRIVER_RUNTIME_CONTROL_RESUME  2U
+
+struct nbdriver_runtime_status {
+	nbdriver_u32 version;
+	nbdriver_u32 size;
+	nbdriver_u32 flags;
+	nbdriver_s32 error;
+	nbdriver_u64 handle;
+	nbdriver_u64 token_lo;
+	nbdriver_u64 token_hi;
+	nbdriver_u64 generation;
+	nbdriver_u32 probe_mask;
+	nbdriver_u32 reserved;
+};
+
+struct nbdriver_runtime_control {
+	nbdriver_u32 version;
+	nbdriver_u32 size;
+	nbdriver_u32 command;
+	nbdriver_u32 reserved;
+	nbdriver_u64 handle;
+	nbdriver_u64 token_lo;
+	nbdriver_u64 token_hi;
+	nbdriver_s32 error;
+	nbdriver_u32 reserved2;
+};
+
 #define NBDRIVER_IOC_MAGIC 'N'
 
 #define NBDRIVER_IOC_GET_ABI \
@@ -82,6 +120,10 @@ struct nbdriver_abi_info {
 	_IOWR(NBDRIVER_IOC_MAGIC, 0x01, struct nbdriver_read_request)
 #define NBDRIVER_IOC_WRITE_PROCESS \
 	_IOWR(NBDRIVER_IOC_MAGIC, 0x02, struct nbdriver_write_request)
+#define NBDRIVER_IOC_RUNTIME_STATUS \
+	_IOR(NBDRIVER_IOC_MAGIC, 0x22, struct nbdriver_runtime_status)
+#define NBDRIVER_IOC_RUNTIME_CONTROL \
+	_IOWR(NBDRIVER_IOC_MAGIC, 0x23, struct nbdriver_runtime_control)
 
 
 /* Additive ABI 5 extensions; existing request layouts and ioctl numbers stay fixed. */
@@ -308,5 +350,49 @@ struct nbdriver_devpts_status {
 #define NBDRIVER_IOC_DEVPTS_STATUS \
 	_IOR(NBDRIVER_IOC_MAGIC, 0x1f, struct nbdriver_devpts_status)
 
+
+#define NBDRIVER_GPU_SYNC_MAX_ID 4096U
+#define NBDRIVER_GPU_SYNC_WORDS (NBDRIVER_GPU_SYNC_MAX_ID / 64U)
+#define NBDRIVER_GPU_BACKEND_IDR_LOCKED 1U
+#define NBDRIVER_GPU_STAGE_NONE 0U
+#define NBDRIVER_GPU_STAGE_IDENTITY 1U
+#define NBDRIVER_GPU_STAGE_LAYOUT 2U
+#define NBDRIVER_GPU_STAGE_PROCESS 3U
+#define NBDRIVER_GPU_STAGE_IDR 4U
+struct nbdriver_gpu_sync_request {
+    nbdriver_s32 pid;
+    nbdriver_s32 target_fd;
+    nbdriver_u64 expected_start_ns;
+    nbdriver_u32 max_id;
+    nbdriver_u32 reserved;
+    nbdriver_u32 first_free;
+    nbdriver_u32 occupied_count;
+    nbdriver_u32 backend;
+    nbdriver_u32 fail_stage;
+    nbdriver_s32 error;
+    nbdriver_u32 reserved2;
+    nbdriver_u64 sample_ns;
+    nbdriver_u64 occupied[NBDRIVER_GPU_SYNC_WORDS];
+};
+#define NBDRIVER_GPU_VISIBILITY_QUERY 0U
+#define NBDRIVER_GPU_VISIBILITY_HIDE 1U
+#define NBDRIVER_GPU_VISIBILITY_SHOW 2U
+#define NBDRIVER_GPU_VISIBILITY_MAX_TARGETS 64U
+struct nbdriver_gpu_visibility_request {
+    nbdriver_s32 pid;
+    nbdriver_u32 operation;
+    nbdriver_u64 expected_start_ns;
+    nbdriver_u32 hidden;
+    nbdriver_u32 active;
+    nbdriver_u32 target_count;
+    nbdriver_s32 error;
+    nbdriver_u64 directory_hits;
+    nbdriver_u64 access_hits;
+    nbdriver_u64 missed;
+};
+#define NBDRIVER_IOC_GPU_SYNC \
+    _IOWR(NBDRIVER_IOC_MAGIC, 0x20, struct nbdriver_gpu_sync_request)
+#define NBDRIVER_IOC_GPU_VISIBILITY \
+    _IOWR(NBDRIVER_IOC_MAGIC, 0x21, struct nbdriver_gpu_visibility_request)
 
 #endif /* NBDRIVER_ABI_H */

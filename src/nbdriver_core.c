@@ -14,6 +14,7 @@
 #include "nbdriver_query.h"
 #include "nbdriver_metadata.h"
 #include "nbdriver_devpts.h"
+#include "nbdriver_runtime.h"
 
 static int __init nbdriver_init(void)
 {
@@ -63,12 +64,18 @@ static int __init nbdriver_init(void)
 		goto err_devpts;
 	}
 
+	ret = nbdriver_runtime_init();
+	if (ret)
+		goto err_entry;
+
 	nbd_info("stage=module_init status=loaded abi=%u entry=%s\n",
 		 NBDRIVER_ABI_VERSION, nbdriver_entry_target());
 	return 0;
 
 err_devpts:
 	nbdriver_devpts_exit();
+err_entry:
+	nbdriver_entry_exit();
 err_metadata:
 	nbdriver_metadata_exit();
 err_query:
@@ -86,6 +93,7 @@ err_comm:
 
 static void __exit nbdriver_exit(void)
 {
+	nbdriver_runtime_exit();
 	nbdriver_entry_exit();
 	nbdriver_devpts_exit();
 	nbdriver_metadata_exit();
@@ -133,12 +141,19 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 			   unsigned long argument)
 {
 	(void)file;
+	if (nbdriver_runtime_quiesced() &&
+	    command != NBDRIVER_IOC_GET_ABI &&
+	    command != NBDRIVER_IOC_RUNTIME_STATUS &&
+	    command != NBDRIVER_IOC_RUNTIME_CONTROL)
+		return -ESHUTDOWN;
 
 	switch (command) {
 	case NBDRIVER_IOC_MAPS:
 	case NBDRIVER_IOC_MAPPING:
 	case NBDRIVER_IOC_VMA:
 	case NBDRIVER_IOC_FD_SIZE:
+	case NBDRIVER_IOC_GPU_SYNC:
+	case NBDRIVER_IOC_GPU_VISIBILITY:
 	case NBDRIVER_IOC_GPU_INFO:
 	case NBDRIVER_IOC_RANDOM:
 		return nbdriver_metadata_ioctl(command, argument);
@@ -167,6 +182,7 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 				NBDRIVER_FEATURE_READV | nbdriver_query_features() |
 				nbdriver_metadata_features() |
 				nbdriver_devpts_features() |
+				nbdriver_runtime_features() |
 				(nbdriver_read_fault_in_ready() ?
 				 NBDRIVER_FEATURE_READ_FAULT_IN : 0),
 			.reserved = 0,
@@ -184,6 +200,10 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 		}
 		return 0;
 	}
+	case NBDRIVER_IOC_RUNTIME_STATUS:
+		return nbdriver_runtime_ioctl(argument);
+	case NBDRIVER_IOC_RUNTIME_CONTROL:
+		return nbdriver_runtime_control_ioctl(argument);
 	default:
 		nbd_warn("stage=ioctl command=0x%08x reason=unknown_command error=%d\n",
 			 command, -ENOTTY);

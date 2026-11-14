@@ -133,6 +133,36 @@ python3 tests/test_readv.py
 
 **maps、映射与元数据扩展**
 
+**GPU/KGSL 查询与节点可撤销过滤**
+
+```c
+struct nbdriver_gpu_info_request info;
+nbdriver_read_gpu_object_info(fd, pid, kgsl_fd, object_id, expected_start_ns, &info);
+/* info.result 是 KGSL 原生 GPUOBJ_INFO 返回值。 */
+
+struct nbdriver_gpu_sync_request sync;
+nbdriver_get_gpu_syncsources(fd, pid, kgsl_fd, 4096, expected_start_ns, &sync);
+/* occupied 位图和 first_free 只是同一把 KGSL 锁下的观察结果，不是预留。 */
+
+nbdriver_hide_gpu_process(fd, pid);
+nbdriver_show_gpu_process(fd, pid);
+```
+
+GPU 查询由驱动根据 PID、目标进程中的 KGSL FD 和对象 ID 完成，用户层不需要提供
+KGSL 私有结构偏移、内核地址或函数地址。syncsource 查询返回有界 IDR 位图；如果
+当前 KGSL 编译形态无法通过布局交叉校验，调用失败并保留 `fail_stage`，不会猜测
+私有结构。
+
+隐藏接口只保存 PID 对应的内核 `struct pid` 和 `start_boottime`，过滤 KGSL 的
+`proc/<pid>`、`pagetables/<pid>` 目录枚举及访问；它不删除厂商节点、不伪造 KGSL
+初始化失败。调用 `nbdriver_show_gpu_process()` 或驱动卸载后，过滤立即撤销。
+进程退出或 PID 重用时，后台清理会丢弃旧绑定。功能位分别是
+`NBDRIVER_FEATURE_GPU_SYNC` 与 `NBDRIVER_FEATURE_GPU_VISIBILITY`；缺少对应内核
+符号或 kprobe 入口时不会发布能力位。
+
+这些接口仍受现有 `CAP_SYS_PTRACE`、进程身份和 LSM 检查约束。GPU 查询不等同于
+GPU 虚拟地址翻译，也不保证所有厂商 KGSL 私有编译形态都支持。
+
 | 单头接口 | 返回 |
 |---|---|
 | nbdriver_process_maps(fd, &req) | 原始 maps 请求，保留 required length、copied、error、身份 |

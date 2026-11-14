@@ -48,21 +48,14 @@ typedef unsigned long long u64;
 #define PTR_ERR(x) ((long)(intptr_t)(x))
 #define MAJOR(x) ((unsigned)major(x))
 #define MINOR(x) ((unsigned)minor(x))
-struct module { atomic_uint refs; bool going; };
-#define DEFINE_MUTEX(name) pthread_mutex_t name = PTHREAD_MUTEX_INITIALIZER
-static void mutex_lock(pthread_mutex_t *m) { assert(!pthread_mutex_lock(m)); }
-static void mutex_unlock(pthread_mutex_t *m) { assert(!pthread_mutex_unlock(m)); }
-static _Thread_local unsigned preempt_depth;
-static void preempt_disable(void) { ++preempt_depth; }
-static void preempt_enable(void) { assert(preempt_depth); --preempt_depth; }
-static bool try_module_get(struct module *m) { if (!m) return true; if (m->going) return false; ++m->refs; return true; }
-static void module_put(struct module *m) { if (m) { assert(m->refs); --m->refs; } }
+#define READ_ONCE(x) (x)
+static unsigned preempt_depth;
 struct kstat { int64_t size; };
 struct super_block { dev_t s_dev; };
 struct inode { struct super_block *i_sb; unsigned long i_ino; mode_t i_mode; };
 struct file;
 struct path { const char *text; };
-struct file_operations { struct module *owner; long (*unlocked_ioctl)(struct file *,unsigned int,unsigned long); };
+struct file_operations { void *owner; long (*unlocked_ioctl)(struct file *,unsigned int,unsigned long); };
 struct file { struct path f_path; struct inode *inode; struct file_operations *f_op; void *private_data; };
 struct anon_vma_name { const char *name; };
 struct vm_area_struct;
@@ -82,38 +75,16 @@ static struct task_struct target={42};
 static struct mm_struct target_mm;
 static struct super_block sb;
 static struct inode inode={&sb,123,S_IFREG};
-static struct module vendor;
+
 static long fake_ioctl(struct file *f,unsigned int c,unsigned long a)
 { (void)f;(void)c;(void)a;return 0; }
-static struct file_operations fops={&vendor,fake_ioctl};
+static struct file_operations fops={NULL,fake_ioctl};
 static struct file file={{"/tmp/map\nname\\suffix"},&inode,&fops,(void *)1};
-static bool permission=true, backend=true, owner_ok=true, profile_ok=true;
-static bool file_valid=true, stat_ok=true, no_mm, gpu_present=true;
-static atomic_uint symbol_lookups;
+static bool permission=true, backend=true;
+static bool file_valid=true, stat_ok=true, no_mm;
+
 static unsigned task_refs,mm_refs,file_refs,locks,gpu_calls,mapping_calls;
 static int allocation_budget=-1;
-static u64 time_now;
-static long fake_gpu(void *p,unsigned int cmd,void *out)
-{
-    struct nbdriver_gpu_object_info *info=out;
-    assert(p==(void *)1 && cmd==0xc0300947U);
-    ++gpu_calls;
-    if(info->id==999)return -EINVAL;
-    info->size=4096;info->gpu_address=0x80000;info->virtual_length=8192;
-    return 0;
-}
-static uint64_t read_once(const void *p,size_t n)
-{
-    uint64_t value=0;
-    uintptr_t offset=(uintptr_t)p-(uintptr_t)fake_gpu;
-    if(profile_ok && n==4) {
-        if(offset==0)return 0xd503233fU;
-        if(offset==16)return 0xb9402841U;
-        if(offset==24)return 0xf9400400U;
-    }
-    memcpy(&value,p,n);return value;
-}
-#define READ_ONCE(x) ((__typeof__(x))read_once(&(x),sizeof(x)))
 static bool capable(int cap){(void)cap;return permission;}
 static bool accessible(const void *p){return (uintptr_t)p>=4096;}
 static unsigned long copy_from_user(void *o,const void *i,size_t n)
@@ -139,18 +110,18 @@ static struct file *fget_task(struct task_struct *t,unsigned int fd)
 static void fput(struct file *f){assert(f==&file&&file_refs);--file_refs;}
 static int vfs_getattr(const struct path *p,struct kstat *s,u32 mask,unsigned flags)
 {assert(p==&file.f_path&&mask==STATX_SIZE&&!flags);if(!stat_ok)return -EACCES;s->size=12345;return 0;}
-static struct module *__module_address(unsigned long addr)
-{assert(preempt_depth);(void)addr;return owner_ok?fops.owner:(fops.owner?NULL:&vendor);}
 static unsigned long nbdriver_ksym_lookup_optional(const char *s)
 {
     if(!strcmp(s,"fget_task"))return backend?(unsigned long)fget_task:0;
     if(!strcmp(s,"vfs_getattr"))return backend?(unsigned long)vfs_getattr:0;
-    if(!strcmp(s,"__module_address"))return (unsigned long)__module_address;
-    if(!strncmp(s,"kgsl_",5))++symbol_lookups;
-    if(!strcmp(s,"kgsl_ioctl"))return gpu_present?(unsigned long)fops.unlocked_ioctl:0;
-    if(!strcmp(s,"kgsl_ioctl_gpuobj_info"))return gpu_present?(unsigned long)fake_gpu:0;
-    abort();
+    return 0;
 }
+static void nbdriver_kgsl_init(void) {}
+static void nbdriver_kgsl_exit(void) {}
+static u32 nbdriver_kgsl_features(void) { return NBDRIVER_FEATURE_GPU_INFO|NBDRIVER_FEATURE_GPU_SYNC; }
+static long nbdriver_kgsl_info_ioctl(unsigned long a) { (void)a; ++gpu_calls; return -EOPNOTSUPP; }
+static long nbdriver_kgsl_sync_ioctl(unsigned long a) { (void)a; ++gpu_calls; return -EOPNOTSUPP; }
+static long nbdriver_kgsl_visibility_ioctl(unsigned long a) { (void)a; ++gpu_calls; return -EOPNOTSUPP; }
 static char *d_path(const struct path *p,char *buf,int size)
 {assert(locks);if(strlen(p->text)>=(size_t)size)return ERR_PTR(-ENAMETOOLONG);strcpy(buf,p->text);return buf;}
 #if TEST_VERSION < KERNEL_VERSION(5,11,0)
@@ -166,61 +137,9 @@ static int nbdriver_mapping_locked(struct vm_area_struct *v,unsigned long a,stru
 {++mapping_calls;assert(locks);r->physical=0x100000+(a&(PAGE_SIZE-1));r->page_size=PAGE_SIZE;r->vma_start=v->vm_start;r->vma_end=v->vm_end;r->flags=NBDRIVER_MAPPING_READ;return 0;}
 static void get_random_bytes(void *out,size_t n){memset(out,0x5a,n);}
 static void memzero_explicit(void *out,size_t n){memset(out,0,n);}
-static u64 ktime_get_ns(void){return ++time_now;}
 #include "metadata_dispatch.inc"
 static long issue(unsigned cmd,void *arg)
 {long ret=nbdriver_metadata_ioctl(cmd,(unsigned long)arg);assert(!task_refs&&!file_refs&&!mm_refs&&!locks&&!preempt_depth);return ret;}
-static void *resolve_worker(void *unused)
-{
-    unsigned long address;
-    (void)unused;
-    for (unsigned n=0;n<10000;++n) {
-        assert(metadata_gpu_resolve(&file,&address)==0);
-        assert(address==(unsigned long)fake_gpu);
-        assert(metadata_gpu_owner(&file,address,(unsigned long)fops.unlocked_ioctl));
-        assert(!preempt_depth);
-    }
-    return NULL;
-}
-static long other_ioctl(struct file *f,unsigned int c,unsigned long a)
-{ return fake_ioctl(f,c,a); }
-static void check_resolver(void)
-{
-    pthread_t workers[6];
-    unsigned long address=0;
-    unsigned count;
-    nbdriver_metadata_exit();
-    assert(!vendor.refs);
-    assert(nbdriver_metadata_init()==0);
-    gpu_present=false;
-    assert(metadata_gpu_resolve(&file,&address)==-ENOTTY && !vendor.refs);
-    gpu_present=true;
-    vendor.going=true;
-    assert(metadata_gpu_resolve(&file,&address)==-EOPNOTSUPP && !vendor.refs);
-    vendor.going=false;
-    count=symbol_lookups;
-    for(unsigned n=0;n<6;++n)assert(!pthread_create(&workers[n],NULL,resolve_worker,NULL));
-    for(unsigned n=0;n<6;++n)assert(!pthread_join(workers[n],NULL));
-    assert(symbol_lookups==count+2 && vendor.refs==1);
-    /* A live module cannot disappear from kallsyms while our reference pins it.
-     * Changing the file operations still forces discovery and ownership checks. */
-    fops.unlocked_ioctl=other_ioctl;
-    gpu_present=false;
-    assert(metadata_gpu_resolve(&file,&address)==-ENOTTY && vendor.refs==1);
-    gpu_present=true;
-    assert(metadata_gpu_resolve(&file,&address)==0 && vendor.refs==1);
-    assert(metadata_gpu_ioctl==(unsigned long)other_ioctl);
-    nbdriver_metadata_exit();
-    assert(!vendor.refs);
-    fops.unlocked_ioctl=fake_ioctl;
-    /* Built-in backends have no module reference to acquire/release. */
-    fops.owner=NULL;
-    assert(nbdriver_metadata_init()==0);
-    assert(metadata_gpu_resolve(&file,&address)==0 && !vendor.refs);
-    nbdriver_metadata_exit();
-    fops.owner=&vendor;
-    assert(nbdriver_metadata_init()==0);
-}
 int main(void)
 {
     struct anon_vma_name anon={"fixture"};
@@ -275,27 +194,12 @@ int main(void)
     fd.target_fd=8;assert(issue(NBDRIVER_IOC_FD_SIZE,&fd)==-EBADF&&fd.error==-EBADF&&!fd.size);
     fd.target_fd=7;stat_ok=false;assert(issue(NBDRIVER_IOC_FD_SIZE,&fd)==-EACCES);stat_ok=true;
     gpu.pid=123;gpu.target_fd=7;gpu.object_id=1;
-    assert(issue(NBDRIVER_IOC_GPU_INFO,&gpu)==-ENOTTY&&!gpu_calls);
-    inode.i_mode=S_IFCHR;
-    owner_ok=false;assert(issue(NBDRIVER_IOC_GPU_INFO,&gpu)==-EOPNOTSUPP&&!gpu_calls);owner_ok=true;
-    profile_ok=false;assert(issue(NBDRIVER_IOC_GPU_INFO,&gpu)==-EOPNOTSUPP&&!gpu_calls);profile_ok=true;
-    assert(issue(NBDRIVER_IOC_GPU_INFO,&gpu)==0&&!gpu.result&&gpu.info.size==4096&&gpu.sample_ns&&gpu_calls==1);
-    gpu.object_id=999;assert(issue(NBDRIVER_IOC_GPU_INFO,&gpu)==0&&gpu.result==-EINVAL&&gpu.sample_ns&&gpu_calls==2);
-    gpu.expected_start_ns=43;assert(issue(NBDRIVER_IOC_GPU_INFO,&gpu)==-ESTALE&&gpu_calls==2);
-    nbdriver_metadata_exit();assert(!vendor.refs);nbdriver_metadata_init();
-    gpu_present=false;gpu.expected_start_ns=0;assert(issue(NBDRIVER_IOC_GPU_INFO,&gpu)==-ENOTTY);gpu_present=true;
-    check_resolver();
-    /* Warm cache must not bypass ownership/profile/target/FD validation. */
-    gpu.expected_start_ns=0;gpu.object_id=1;
-    assert(issue(NBDRIVER_IOC_GPU_INFO,&gpu)==0);
-    unsigned warm_calls=gpu_calls, warm_lookups=symbol_lookups;
-    owner_ok=false;assert(issue(NBDRIVER_IOC_GPU_INFO,&gpu)==-EOPNOTSUPP);owner_ok=true;
-    profile_ok=false;assert(issue(NBDRIVER_IOC_GPU_INFO,&gpu)==-EOPNOTSUPP);profile_ok=true;
-    file_valid=false;assert(issue(NBDRIVER_IOC_GPU_INFO,&gpu)==-EBADF);file_valid=true;
-    gpu.expected_start_ns=43;assert(issue(NBDRIVER_IOC_GPU_INFO,&gpu)==-ESTALE);gpu.expected_start_ns=42;
-    assert(gpu_calls==warm_calls && symbol_lookups==warm_lookups);
-    assert(issue(NBDRIVER_IOC_GPU_INFO,&gpu)==0 && gpu_calls==warm_calls+1);
-    assert(symbol_lookups==warm_lookups && vendor.refs==1);
+    assert(issue(NBDRIVER_IOC_GPU_INFO,&gpu)==-EOPNOTSUPP&&gpu_calls==1);
+    assert(issue(NBDRIVER_IOC_GPU_SYNC,&gpu)==-EOPNOTSUPP&&gpu_calls==2);
+    assert(issue(NBDRIVER_IOC_GPU_VISIBILITY,&gpu)==-EOPNOTSUPP&&gpu_calls==3);
+    permission=false;assert(issue(NBDRIVER_IOC_GPU_INFO,&gpu)==-EPERM&&gpu_calls==3);
+    assert(issue(NBDRIVER_IOC_GPU_SYNC,&gpu)==-EPERM&&gpu_calls==3);
+    assert(issue(NBDRIVER_IOC_GPU_VISIBILITY,&gpu)==-EPERM&&gpu_calls==3);permission=true;
     memset(bytes,0xcc,sizeof(bytes));random.buffer=(uintptr_t)(bytes+1);random.size=64;
     assert(issue(NBDRIVER_IOC_RANDOM,&random)==0&&random.copied==64&&bytes[0]==0xcc&&bytes[65]==0xcc&&bytes[1]==0x5a);
     random.buffer=1;assert(issue(NBDRIVER_IOC_RANDOM,&random)==-EFAULT&&!random.copied&&random.error==-EFAULT);
@@ -303,7 +207,7 @@ int main(void)
     permission=false;assert(issue(NBDRIVER_IOC_MAPS,&maps)==-EPERM);assert(issue(NBDRIVER_IOC_RANDOM,&random)==-EPERM);permission=true;
     assert(issue(0,NULL)==-ENOTTY);assert(issue(NBDRIVER_IOC_MAPS,NULL)==-EFAULT);
     backend=false;nbdriver_metadata_init();assert(!(nbdriver_metadata_features()&NBDRIVER_FEATURE_FD_SIZE));assert(issue(NBDRIVER_IOC_FD_SIZE,&fd)==-EOPNOTSUPP);
-    nbdriver_metadata_exit();assert(!vendor.refs);
-    puts("PASS: actual metadata dispatcher, maps/escaping/ENOSPC, identity, FD, GPU live validation/result, concurrent resolver cache, module references, late backend, random bounds, cleanup");
+    nbdriver_metadata_exit();
+    puts("PASS: actual metadata dispatcher, maps/escaping/ENOSPC, identity, FD, GPU dispatch permission gates, late backend, random bounds, cleanup");
     return 0;
 }
