@@ -34,8 +34,9 @@ typedef int32_t s32;
 #define PAGE_KERNEL 0
 #define THIS_MODULE ((void *)1)
 #define DEFINE_MUTEX(x) int x
-#define mutex_lock(x) ((void)(x))
-#define mutex_unlock(x) ((void)(x))
+static unsigned int lock_depth;
+#define mutex_lock(x) ((void)(x),++lock_depth)
+#define mutex_unlock(x) ((void)(x),assert(lock_depth),--lock_depth)
 #define smp_wmb() ((void)0)
 struct cpumask { int unused; };
 struct page { int unused; };
@@ -65,7 +66,7 @@ static long kernel_read(void *dst,const void *src,size_t n)
 static long kernel_write(void *dst,const void *src,size_t n)
 { assert(mapped&&n==sizeof(void *));if(write_error)return write_error;memcpy(dst,src,n);return 0; }
 static int stop_machine_fn(int (*fn)(void *),void *arg,const struct cpumask *mask)
-{ assert(!mask&&mapped);++patches;return stop_error?stop_error:fn(arg); }
+{ assert(!mask&&mapped&&lock_depth);++patches;return stop_error?stop_error:fn(arg); }
 static void sync_fn(void) { assert(mapped&&refs==1);++syncs; }
 static unsigned long nbdriver_ksym_lookup_optional(const char *name)
 {
@@ -95,7 +96,7 @@ static int nbdriver_runtime_lock;
 '''+s+control+r'''
 static void prepare(void)
 {
- assert(!refs&&!mapped);
+ assert(!refs&&!mapped&&!lock_depth);
  for(unsigned int i=0;i<512;++i)table[i]=used_fn;
  image_offset=(unsigned long)table-(1000UL<<12);
  absent_table=absent_sync=absent_work=pin_fail=bad_pfn=map_fail=false;

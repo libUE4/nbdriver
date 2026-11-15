@@ -191,7 +191,7 @@ static noinline int NBDRIVER_NO_CFI nbdriver_table_init(void)
 	unsigned long image_offset_address, image_offset;
 	unsigned long address, physical;
 	struct page *page;
-	unsigned int index, n;
+	unsigned int index, n, ni_count = 0;
 	int ret;
 
 	if (nbdriver_table_pinned)
@@ -219,8 +219,15 @@ static noinline int NBDRIVER_NO_CFI nbdriver_table_init(void)
 			!!nbdriver_tasks_sync_ptr, !!image_offset_address);
 		return -ENOENT;
 	}
-	for (n = 0; n < ARRAY_SIZE(ni_names); ++n)
+	for (n = 0; n < ARRAY_SIZE(ni_names); ++n) {
 		ni[n] = (nbdriver_syscall_fn)nbdriver_ksym_lookup_optional(ni_names[n]);
+		if (ni[n])
+			++ni_count;
+	}
+	if (!ni_count) {
+		nbd_warn("stage=syscall_table reason=no_ni_handler error=%d\n", -ENOENT);
+		return -ENOENT;
+	}
 	/* Only select slots in the SDK's search domain; a later unused slot
 	 * outside that domain would create a loaded but unreachable driver. */
 	for (index = 0; index < NBDRIVER_INSTALL_CANDIDATE_COUNT; ++index) {
@@ -340,6 +347,9 @@ int nbdriver_entry_init(void)
 		nbdriver_ksym_lookup("task_work_add");
 	if (!nbdriver_task_work_add_fn)
 		return -ENOENT;
+	/* A table call may create its first FD before module_init returns.
+	 * Serialize that caller's QUIESCE/RESUME against installation too. */
+	mutex_lock(&nbdriver_entry_lock);
 	table_ret = nbdriver_table_init();
 	if (table_ret)
 		nbd_warn("stage=entry_init path=syscall_table error=%d\n", table_ret);
@@ -351,10 +361,12 @@ int nbdriver_entry_init(void)
 	if (table_ret && reboot_ret) {
 		nbd_err("stage=entry_init reason=no_entry table_error=%d reboot_error=%d\n",
 			table_ret, reboot_ret);
+		mutex_unlock(&nbdriver_entry_lock);
 		return reboot_ret;
 	}
 	nbd_info("stage=entry_init status=ready syscall_nr=%d reboot=%u\n",
 		nbdriver_syscall_number, nbdriver_reboot_active);
+	mutex_unlock(&nbdriver_entry_lock);
 	return 0;
 }
 
