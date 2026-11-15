@@ -18,25 +18,41 @@ objdump=a.objdump or next((p for n in ('llvm-objdump','llvm-objdump-18','aarch64
 if not objdump:
     raise SystemExit('AArch64 objdump unavailable')
 r=subprocess.run([objdump,'-dr',str(a.module)],capture_output=True,text=True,check=True)
-functions=re.split(r'(?m)^([0-9a-f]+) <([^>]+)>:\n',r.stdout)
+functions=re.split(r'(?mi)^([0-9a-f]+) <([^>]+)>:\n',r.stdout)
 for i in range(1,len(functions),3):
     name=functions[i+1];body=functions[i+2]
     if not name.startswith('nbdriver_fd_work_fn') or not re.search(r'R_AARCH64_JUMP26\s+module_put\b',body):
         continue
     instructions=[]
     for line in body.splitlines():
-        m=re.match(r'\s*[0-9a-f]+:\s+[0-9a-f]{8}\s+([a-z][a-z0-9.]*)\s*(.*)',line)
+        # LLVM versions print either a word or four little-endian bytes.
+        # Compare encoded instructions so hint/BTI/PAC aliases cannot affect
+        # validation, and still require exact frame restoration and tail jump.
+        m=re.match(r'\s*([0-9a-f]+):\s+([0-9a-f]{8}|[0-9a-f]{2}(?:[ \t]+[0-9a-f]{2}){3})\s+(.+)',line,re.I)
         if m:
-            instructions.append((m.group(1),m.group(2)))
+            raw=m.group(2)
+            word=int.from_bytes(bytes.fromhex(raw),'little') if re.search(r'\s',raw) else int(raw,16)
+            instructions.append((int(m.group(1),16),word))
+    # Newer toolchains may add one BTI landing pad before the explicit BTI.
+    # This does not change LR/SP; do not allow any other extra instructions.
+    if len(instructions)==9 and instructions[0][1]==instructions[1][1]==0xd503245f:
+        instructions=instructions[1:]
     # The first four instructions preserve the call boundary. The last four
     # restore it and branch to core kernel code; no epilogue remains in nbdriver.
-    expected=['bti','paciasp','stp','mov','bl','ldp','autiasp','b']
-    if [x[0] for x in instructions] != expected:
+    expected=[0xd503245f,0xd503233f,0xa9bf7bfd,0x910003fd,
+              0x94000000,0xa8c17bfd,0xd50323bf,0x14000000]
+    words=[word & 0xfc000000 if index in (4,7) else word
+           for index,(_,word) in enumerate(instructions)]
+    if words != expected:
+        print(body.strip())
         raise SystemExit('unexpected callback machine code: '+str(instructions))
-    if not re.search(r'R_AARCH64_CALL26\s+nbdriver_fd_work_run\b',body):
+    def relocation(index,kind,symbol):
+        return re.search(r'(?mi)^\s*0*'+format(instructions[index][0],'x')+
+                         r':\s+'+kind+r'\s+'+symbol+r'\b',body)
+    if not relocation(4,'R_AARCH64_CALL26','nbdriver_fd_work_run'):
         raise SystemExit('callback does not call its C worker')
-    if not all(reg in instructions[2][1] and reg in instructions[5][1] for reg in ('x29','x30','sp')):
-        raise SystemExit('callback does not restore its caller frame before module_put')
+    if not relocation(7,'R_AARCH64_JUMP26','module_put'):
+        raise SystemExit('callback does not tail-jump to core module_put')
     print(body.strip())
     print('PASS: actual callback restores LR/SP, then jumps to core module_put; no module return instructions remain')
     break

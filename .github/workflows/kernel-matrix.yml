@@ -79,6 +79,7 @@ jobs:
           set -euo pipefail
           python3 tests/test_query_authorization.py
           python3 tests/test_sf_groups.py
+          python3 tests/test_callback_tail.py
           python3 tests/test_udp_capture.py
           python3 tests/test_udp_sdk.py
 
