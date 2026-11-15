@@ -420,6 +420,9 @@ long nbdriver_metadata_ioctl(unsigned int command, unsigned long argument)
 static int (*kgsl_read_fn)(void *, const void *, size_t);
 static int (*kgsl_size_fn)(unsigned long, unsigned long *, unsigned long *);
 static struct module *(*kgsl_module_fn)(unsigned long);
+/* DDK exports do not guarantee a vendor export. Keep this optional so an
+ * unexported XArray helper cannot prevent the entire module from loading. */
+static __typeof__(&xas_find_marked) kgsl_xas_find_marked_fn;
 static DEFINE_MUTEX(kgsl_lock);
 static struct module *kgsl_owner;
 static const struct file_operations *kgsl_fops;
@@ -1385,18 +1388,20 @@ out_rcu:
     return ret;
 }
 
-static int kgsl_find_lowest_free_once(struct idr *idr, u32 min_id,
-                                      u32 *out_id)
+static noinline int NBDRIVER_NO_CFI
+kgsl_find_lowest_free_once(struct idr *idr, u32 min_id, u32 *out_id)
 {
     XA_STATE(xas, &idr->idr_rt, min_id);
     void *entry = NULL;
     unsigned int attempt;
     int ret = 0;
 
+    if (!kgsl_xas_find_marked_fn)
+        return -EOPNOTSUPP;
     rcu_read_lock();
     for (attempt = 0; attempt < KGSL_SYNCSOURCE_XAS_RETRIES; attempt++) {
-        entry = xas_find_marked(&xas, (unsigned long)INT_MAX,
-                                XA_FREE_MARK);
+        entry = kgsl_xas_find_marked_fn(&xas, (unsigned long)INT_MAX,
+                                      XA_FREE_MARK);
         if (!xas_retry(&xas, entry))
             break;
     }
@@ -1451,6 +1456,8 @@ void nbdriver_kgsl_init(void)
     kgsl_read_fn = (__typeof__(kgsl_read_fn))nbdriver_ksym_lookup_optional("copy_from_kernel_nofault");
     kgsl_size_fn = (__typeof__(kgsl_size_fn))nbdriver_ksym_lookup_optional("kallsyms_lookup_size_offset");
     kgsl_module_fn = (__typeof__(kgsl_module_fn))nbdriver_ksym_lookup_optional("__module_address");
+    kgsl_xas_find_marked_fn = (__typeof__(kgsl_xas_find_marked_fn))
+        nbdriver_ksym_lookup_optional("xas_find_marked");
     nbdriver_kgsl_visibility_init();
     (void)nbdriver_proc_visibility_init();
 }
@@ -1464,6 +1471,7 @@ void nbdriver_kgsl_exit(void)
     kgsl_read_fn = NULL;
     kgsl_size_fn = NULL;
     kgsl_module_fn = NULL;
+    kgsl_xas_find_marked_fn = NULL;
 }
 
 u32 nbdriver_kgsl_features(void)
@@ -1479,7 +1487,7 @@ u32 nbdriver_kgsl_features(void)
     if (nbdriver_ksym_lookup_optional("kgsl_ioctl_gpuobj_info") ||
         kgsl_lookup_cfi_symbol("kgsl_ioctl_gpuobj_info"))
         features |= NBDRIVER_FEATURE_GPU_INFO;
-    if (kgsl_read_fn && kgsl_size_fn &&
+    if (kgsl_read_fn && kgsl_size_fn && kgsl_xas_find_marked_fn &&
         nbdriver_ksym_lookup_optional("kgsl_ioctl_syncsource_create") &&
         nbdriver_ksym_lookup_optional("kgsl_ioctl_syncsource_destroy"))
         features |= NBDRIVER_FEATURE_GPU_SYNC;

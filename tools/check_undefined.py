@@ -72,6 +72,8 @@ def main():
         "empty_zero_page", "init_mm", "sys_call_table",
         "kallsyms_lookup_name", "task_work_add", "__set_fixmap",
         "copy_to_kernel_nofault", "__arm64_sys_reboot",
+        # Observed absent from vendor 6.1.141 exports despite the DDK export.
+        "xas_find_marked",
     }
     missing = [name for name in imports if name not in exports or name in protected]
 

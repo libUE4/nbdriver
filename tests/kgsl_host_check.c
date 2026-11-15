@@ -108,7 +108,9 @@ static void __attribute__((aligned(4))) spin_stub(void){}
 static int fake_nofault(void *to,const void *from,size_t n){if(bad_copy||(uintptr_t)from<4096)return -EFAULT;memcpy(to,from,n);return 0;}
 static int fake_size(unsigned long a,unsigned long *size,unsigned long *offset){*offset=0;if(a==(unsigned long)create_code)*size=create_len*4;else if(a==(unsigned long)destroy_code)*size=destroy_len*4;else if(a==(unsigned long)jump_code)*size=8;else return 0;return 1;}
 static struct module *fake_module(unsigned long a){(void)a;assert(preempt);return owner_ok?&vendor:&foreign;}
+static bool xas_symbol_present=true;
 static unsigned long nbdriver_ksym_lookup_optional(const char *s){
+ if(!strcmp(s,"xas_find_marked"))return xas_symbol_present?(unsigned long)xas_find_marked:0;
  if(!strcmp(s,"copy_from_kernel_nofault"))return (unsigned long)fake_nofault;
  if(!strcmp(s,"kallsyms_lookup_size_offset"))return (unsigned long)fake_size;
  if(!strcmp(s,"__module_address"))return (unsigned long)fake_module;
@@ -165,6 +167,15 @@ int main(void){
  assert(!kgsl_resolve(&file,true,&layout,NULL,&stage)&&layout.process_priv_offset==8&&layout.syncsource_idr_offset==64);
  allocated[0]=1ULL|(1ULL<<63);allocated[1]=1ULL; /* IDs 1,64,65; ID 65 models allocated NULL. */
  assert(!nbdriver_kgsl_sync_ioctl((unsigned long)&sync)&&sync.backend==1&&sync.occupied_count==3&&sync.first_free==2&&sync.occupied[0]==allocated[0]&&sync.occupied[1]==allocated[1]&&!sync.error&&!sync.fail_stage);no_refs();
+ xas_symbol_present=false;reset_backend();
+ assert(!(nbdriver_kgsl_features()&NBDRIVER_FEATURE_GPU_SYNC));
+ assert(nbdriver_kgsl_features()&NBDRIVER_FEATURE_GPU_INFO);
+ {u32 free_id=123;assert(kgsl_find_lowest_free_once(&process.idr,1,&free_id)==-EOPNOTSUPP&&free_id==123);}
+ assert(nbdriver_kgsl_sync_ioctl((unsigned long)&sync)==-EOPNOTSUPP&&!sync.occupied_count&&!sync.occupied[0]);no_refs();
+ assert(!nbdriver_kgsl_info_ioctl((unsigned long)&info));no_refs();
+ xas_symbol_present=true;reset_backend();
+ assert(nbdriver_kgsl_features()&NBDRIVER_FEATURE_GPU_SYNC);
+ assert(!nbdriver_kgsl_sync_ioctl((unsigned long)&sync)&&sync.first_free==2&&sync.occupied_count==3);no_refs();
  sync.expected_start_ns=43;assert(nbdriver_kgsl_sync_ioctl((unsigned long)&sync)==-ESTALE&&!sync.occupied_count&&!sync.occupied[0]);sync.expected_start_ns=0;
  sync.reserved2=1;assert(nbdriver_kgsl_sync_ioctl((unsigned long)&sync)==-EINVAL);sync.reserved2=0;
  sync.max_id=4097;assert(nbdriver_kgsl_sync_ioctl((unsigned long)&sync)==-EINVAL);sync.max_id=130;
