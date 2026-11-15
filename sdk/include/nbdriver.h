@@ -31,7 +31,22 @@ typedef int64_t nbdriver_s64;
 #define NBDRIVER_ABI_VERSION 5U
 #define NBDRIVER_INSTALL_MAGIC1 0x44464D50U /* DFMP */
 #define NBDRIVER_INSTALL_MAGIC2 0x504D4644U /* PMFD */
-#define NBDRIVER_INSTALL_SYSCALL 18U
+#define NBDRIVER_INSTALL_SYSCALL 18U /* preferred; the installed slot is dynamic */
+#define NBDRIVER_INSTALL_REBOOT_SYSCALL 142U /* Android ARM64 */
+#define NBDRIVER_INSTALL_CANDIDATE_COUNT 150U
+
+/* Keep kernel slot selection and the standalone SDK's bounded scan identical. */
+static inline unsigned int nbdriver_install_candidate(unsigned int index)
+{
+    static const unsigned int preferred[] = { 18U, 38U, 42U, 163U, 164U };
+    if (index < 5U)
+        return preferred[index];
+    if (index < 21U)
+        return 244U + index - 5U;
+    if (index < NBDRIVER_INSTALL_CANDIDATE_COUNT)
+        return 295U + index - 21U;
+    return ~0U;
+}
 /* Untouched bootstrap output; all other negative values are -errno. */
 #define NBDRIVER_INSTALL_PENDING (-2147483647 - 1)
 
@@ -488,39 +503,61 @@ extern "C" {
 extern long int syscall(long int number, ...) __THROW;
 #endif
 
-/* The FD/error written by task_work is authoritative. A successful open also
- * verifies the ABI; failed validation closes the descriptor and preserves errno. */
+/* -2 means this syscall did not recognize the bootstrap; -1 is an
+ * authoritative driver/ABI error. Only a validated anonymous FD is success. */
+static inline int nbdriver_bootstrap_try(unsigned int number, int *observed_error)
+{
+    struct nbdriver_abi_info info;
+    int fd = NBDRIVER_INSTALL_PENDING;
+    int error;
+
+    errno = 0;
+    /* Set all six arguments: scanned ordinary syscalls must never consume
+     * uninitialized register arguments. These numbers are Android ARM64 ABI. */
+    (void)syscall(number, NBDRIVER_INSTALL_MAGIC1, NBDRIVER_INSTALL_MAGIC2,
+                  0, &fd, 0UL, 0UL);
+    error = errno;
+    if (fd == NBDRIVER_INSTALL_PENDING) {
+        if (error && error != EINVAL && error != ENOSYS &&
+            (!*observed_error || error == EPERM || error == EACCES))
+            *observed_error = error;
+        return -2;
+    }
+    if (fd < 0) {
+        errno = fd >= -4095 ? -fd : EPROTO;
+        return -1;
+    }
+    memset(&info, 0, sizeof(info));
+    if (ioctl(fd, NBDRIVER_IOC_GET_ABI, &info) < 0) {
+        error = errno;
+        close(fd);
+        errno = error;
+        return -1;
+    }
+    if (info.version != NBDRIVER_ABI_VERSION || info.size != sizeof(info)) {
+        close(fd);
+        errno = EPROTO;
+        return -1;
+    }
+    errno = 0;
+    return fd;
+}
+
 static inline int nbdriver_open(void)
 {
-	struct nbdriver_abi_info info;
-	int fd = NBDRIVER_INSTALL_PENDING;
-	int error;
+    unsigned int index;
+    int fd, observed_error = 0;
 
-	errno = 0;
-	(void)syscall(NBDRIVER_INSTALL_SYSCALL, NBDRIVER_INSTALL_MAGIC1,
-		      NBDRIVER_INSTALL_MAGIC2, 0, &fd);
-	error = errno;
-	if (fd < 0) {
-		if (fd != NBDRIVER_INSTALL_PENDING)
-			errno = fd >= -4095 ? -fd : EPROTO;
-		else
-			errno = error && error != EINVAL ? error : ENODEV;
-		return -1;
-	}
-	memset(&info, 0, sizeof(info));
-	if (ioctl(fd, NBDRIVER_IOC_GET_ABI, &info) < 0) {
-		error = errno;
-		close(fd);
-		errno = error;
-		return -1;
-	}
-	if (info.version != NBDRIVER_ABI_VERSION || info.size != sizeof(info)) {
-		close(fd);
-		errno = EPROTO;
-		return -1;
-	}
-	errno = 0;
-	return fd;
+    for (index = 0; index < NBDRIVER_INSTALL_CANDIDATE_COUNT; ++index) {
+        fd = nbdriver_bootstrap_try(nbdriver_install_candidate(index), &observed_error);
+        if (fd != -2)
+            return fd;
+    }
+    fd = nbdriver_bootstrap_try(NBDRIVER_INSTALL_REBOOT_SYSCALL, &observed_error);
+    if (fd != -2)
+        return fd;
+    errno = observed_error ? observed_error : ENODEV;
+    return -1;
 }
 
 static inline void nbdriver_close(int fd)

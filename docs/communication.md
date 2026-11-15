@@ -1,6 +1,6 @@
 # 通信机制与迁移基线
 
-本文保留早期通信迁移阶段；当前驱动已有进程/线程、批量读写和元数据功能，当前状态见 [修复记录](audit-fixes-20261114.md)。
+当前双入口和卸载协议见 [内核兼容策略](kernel-compatibility.md)。本文保留早期通信迁移阶段；当前驱动已有进程/线程、批量读写和元数据功能，当前状态见 [修复记录](audit-fixes-20261114.md)。
 
 本记录基于工作区内的 enkernel、LinyuKernel 和 NBG-driver 源码静态阅读。未加载原项目驱动，未执行其隐藏入口，未验证原项目设备行为。该迁移阶段把 nbdriver 改为匿名 FD + ioctl：只采用 enkernel 的 task_work 延迟 FD 安装与 ARM64 wrapper 参数读取，不采用其 syscall 表改写路径。
 
@@ -40,9 +40,9 @@
 ## nbdriver 的迁移拆分
 
 1. `include/nbdriver_abi.h` 是唯一协议定义，用户态与内核态共用，结构使用固定宽度字段。
-2. 当前选匿名 FD + ioctl；SDK 通过 reboot magic 握手请求 FD。
+2. 该历史阶段选匿名 FD + ioctl；SDK 通过 reboot magic 握手请求 FD。
 3. kprobe pre-handler 只解析 wrapper/参数并将工作排入 `task_work`；分配 FD、anon inode 和用户内存回写在任务上下文执行。
-4. 不移植 enkernel 的 syscall table 扫描或改写路径。
+4. 该历史阶段不移植 syscall table 路径；2026-11-15 已按用户要求加入动态空槽和独立 reboot 后备，具体实现及恢复约束见内核兼容策略。
 5. 入口选择依据见 [communication-comparison.md](communication-comparison.md)。改动完成后必须重跑六 KMI DDK 矩阵，再对 PKR110 执行加载、ioctl 和卸载恢复验证。
 6. 后续功能按实际模块命名，并在 `src/Makefile` 显式添加对象。
 

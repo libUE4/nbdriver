@@ -23,7 +23,22 @@ typedef int64_t nbdriver_s64;
 #define NBDRIVER_ABI_VERSION 5U
 #define NBDRIVER_INSTALL_MAGIC1 0x44464D50U /* DFMP */
 #define NBDRIVER_INSTALL_MAGIC2 0x504D4644U /* PMFD */
-#define NBDRIVER_INSTALL_SYSCALL 18U
+#define NBDRIVER_INSTALL_SYSCALL 18U /* preferred; the installed slot is dynamic */
+#define NBDRIVER_INSTALL_REBOOT_SYSCALL 142U /* Android ARM64 */
+#define NBDRIVER_INSTALL_CANDIDATE_COUNT 150U
+
+/* Keep kernel slot selection and the standalone SDK's bounded scan identical. */
+static inline unsigned int nbdriver_install_candidate(unsigned int index)
+{
+    static const unsigned int preferred[] = { 18U, 38U, 42U, 163U, 164U };
+    if (index < 5U)
+        return preferred[index];
+    if (index < 21U)
+        return 244U + index - 5U;
+    if (index < NBDRIVER_INSTALL_CANDIDATE_COUNT)
+        return 295U + index - 21U;
+    return ~0U;
+}
 /* Untouched bootstrap output; all other negative values are -errno. */
 #define NBDRIVER_INSTALL_PENDING (-2147483647 - 1)
 

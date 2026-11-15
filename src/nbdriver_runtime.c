@@ -7,6 +7,7 @@
 
 #include "nbdriver_abi.h"
 #include "nbdriver_log.h"
+#include "nbdriver_entry.h"
 #include "nbdriver_runtime.h"
 #include "nbdriver_udp.h"
 
@@ -16,7 +17,6 @@ struct nbdriver_runtime_state {
 	u64 token_hi;
 	u64 generation;
 	u32 flags;
-	u32 probe_mask;
 	s32 error;
 };
 
@@ -36,8 +36,7 @@ int nbdriver_runtime_init(void)
 	state.flags = NBDRIVER_RUNTIME_READY |
 		NBDRIVER_RUNTIME_RESIDENT |
 		NBDRIVER_RUNTIME_PROBES;
-	/* The module entry probe is mandatory for the anonymous-FD handshake. */
-	state.probe_mask = 1U;
+	/* The live table/probe mask is reported from the entry implementation. */
 	mutex_lock(&nbdriver_runtime_lock);
 	nbdriver_runtime = state;
 	mutex_unlock(&nbdriver_runtime_lock);
@@ -52,7 +51,6 @@ void nbdriver_runtime_exit(void)
 	mutex_lock(&nbdriver_runtime_lock);
 	nbdriver_runtime.flags = 0;
 	nbdriver_runtime.error = 0;
-	nbdriver_runtime.probe_mask = 0;
 	mutex_unlock(&nbdriver_runtime_lock);
 	nbd_info("stage=runtime status=stopped\n");
 }
@@ -73,7 +71,7 @@ long nbdriver_runtime_ioctl(unsigned long argument)
 	status.token_lo = nbdriver_runtime.token_lo;
 	status.token_hi = nbdriver_runtime.token_hi;
 	status.generation = nbdriver_runtime.generation;
-	status.probe_mask = nbdriver_runtime.probe_mask;
+	status.probe_mask = nbdriver_entry_probe_mask();
 	mutex_unlock(&nbdriver_runtime_lock);
 	return copy_to_user((void __user *)argument, &status, sizeof(status))
 		? -EFAULT : 0;
@@ -96,11 +94,17 @@ long nbdriver_runtime_control_ioctl(unsigned long argument)
 	    control.token_hi != nbdriver_runtime.token_hi) {
 		ret = -ESTALE;
 	} else if (control.command == NBDRIVER_RUNTIME_CONTROL_QUIESCE) {
-		nbdriver_runtime.flags &= ~NBDRIVER_RUNTIME_READY;
-		nbdriver_runtime.flags |= NBDRIVER_RUNTIME_QUIESCED;
+		ret = nbdriver_entry_quiesce();
+		if (!ret) {
+			nbdriver_runtime.flags &= ~NBDRIVER_RUNTIME_READY;
+			nbdriver_runtime.flags |= NBDRIVER_RUNTIME_QUIESCED;
+		}
 	} else if (control.command == NBDRIVER_RUNTIME_CONTROL_RESUME) {
-		nbdriver_runtime.flags |= NBDRIVER_RUNTIME_READY;
-		nbdriver_runtime.flags &= ~NBDRIVER_RUNTIME_QUIESCED;
+		ret = nbdriver_entry_resume();
+		if (!ret) {
+			nbdriver_runtime.flags |= NBDRIVER_RUNTIME_READY;
+			nbdriver_runtime.flags &= ~NBDRIVER_RUNTIME_QUIESCED;
+		}
 	} else {
 		ret = -EINVAL;
 	}

@@ -14,7 +14,8 @@ SYMBOLS = [
     "anon_inode_getfile", "get_unused_fd_flags", "put_unused_fd", "fd_install",
     "fput", "task_work_add", "register_kprobe", "unregister_kprobe",
     "kallsyms_lookup_name", "sys_call_table", "__arm64_sys_ni_syscall",
-    "sys_ni_syscall", "copy_to_kernel_nofault", "stop_machine", "__set_fixmap",
+    "synchronize_rcu_tasks", "synchronize_rcu_tasks_rude", "kimage_voffset",
+    "sys_ni_syscall", "copy_from_kernel_nofault", "copy_to_kernel_nofault", "stop_machine", "__set_fixmap",
     "dcache_clean_inval_poc", "__flush_dcache_area", "init_mm",
     "__arm64_sys_reboot", "__se_sys_reboot", "__arch_copy_to_user",
     "mm_access", "fixup_user_fault", "zero_pfn", "copy_to_user_page",
@@ -24,6 +25,8 @@ SYMBOLS = [
 SOURCE_PATHS = [
     "Makefile", "kernel/kallsyms.c", "kernel/task_work.c", "kernel/kprobes.c",
     "mm/gup.c", "mm/memory.c", "arch/arm64/mm/flush.c", "include/linux/mm.h",
+    "kernel/rcu/tasks.h", "kernel/stop_machine.c", "mm/vmalloc.c",
+    "arch/arm64/include/asm/memory.h", "include/linux/vmalloc.h",
     "kernel/reboot.c", "fs/anon_inodes.c", "fs/file.c", "mm/maccess.c",
     "arch/arm64/kernel/sys.c", "arch/arm64/kernel/syscall.c",
     "arch/arm64/include/asm/syscall_wrapper.h", "arch/arm64/include/asm/cacheflush.h",
@@ -38,6 +41,7 @@ CONFIGS = [
     "CONFIG_MODULE_SIG_FORCE", "CONFIG_KPROBES", "CONFIG_KALLSYMS", "CONFIG_KALLSYMS_ALL",
     "CONFIG_LTO_CLANG", "CONFIG_LTO_CLANG_THIN", "CONFIG_CFI_CLANG", "CONFIG_CFI_PERMISSIVE",
     "CONFIG_ARM64_4K_PAGES", "CONFIG_ARM64_16K_PAGES", "CONFIG_ARM64_64K_PAGES",
+    "CONFIG_TASKS_RCU", "CONFIG_TASKS_RUDE_RCU",
     "CONFIG_STRICT_KERNEL_RWX", "CONFIG_RANDOMIZE_BASE", "CONFIG_TRIM_UNUSED_KSYMS",
     "CONFIG_UNUSED_KSYMS_WHITELIST", "CONFIG_ANDROID_KABI_RESERVE",
 ]

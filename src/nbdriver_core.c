@@ -63,22 +63,24 @@ static int __init nbdriver_init(void)
 		goto err_metadata;
 	nbdriver_udp_init();
 
-	ret = nbdriver_entry_init();
+	ret = nbdriver_runtime_init();
 	if (ret) {
-		nbd_err("stage=module_init dependency=entry error=%d\n", ret);
+		nbd_err("stage=module_init dependency=runtime error=%d\n", ret);
 		goto err_devpts;
 	}
 
-	ret = nbdriver_runtime_init();
-	if (ret)
-		goto err_entry;
+	ret = nbdriver_entry_init();
+	if (ret) {
+		nbd_err("stage=module_init dependency=entry error=%d\n", ret);
+		goto err_runtime;
+	}
 
 	nbd_info("stage=module_init status=loaded abi=%u entry=%s\n",
 		 NBDRIVER_ABI_VERSION, nbdriver_entry_target());
 	return 0;
 
-err_entry:
-	nbdriver_entry_exit();
+err_runtime:
+	nbdriver_runtime_exit();
 err_devpts:
 	nbdriver_udp_exit();
 	nbdriver_devpts_exit();

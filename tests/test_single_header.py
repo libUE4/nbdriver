@@ -19,6 +19,7 @@ PROBE = r'''
 #include <sys/syscall.h>
 
 static int installed_fd = 17;
+static unsigned int selected_nr = 18, bootstrap_calls, last_nr;
 static int bootstrap_errno = EINVAL;
 static int abi_error, abi_mismatch;
 static int ioctl_count;
@@ -32,12 +33,18 @@ extern "C" {
 long __wrap_syscall(long number, ...)
 {
     va_list args;
-    assert(number == NBDRIVER_INSTALL_SYSCALL);
+    assert((unsigned long)number == (bootstrap_calls < NBDRIVER_INSTALL_CANDIDATE_COUNT
+        ? nbdriver_install_candidate(bootstrap_calls) : NBDRIVER_INSTALL_REBOOT_SYSCALL));
+    ++bootstrap_calls;last_nr=(unsigned int)number;
     va_start(args, number);
     assert(va_arg(args, unsigned int) == NBDRIVER_INSTALL_MAGIC1);
     assert(va_arg(args, unsigned int) == NBDRIVER_INSTALL_MAGIC2);
     assert(va_arg(args, int) == 0);
-    *va_arg(args, int *) = installed_fd;
+    int *out = va_arg(args, int *);
+    assert(*out == NBDRIVER_INSTALL_PENDING);
+    if ((unsigned int)number == selected_nr) *out = installed_fd;
+    assert(va_arg(args, unsigned long) == 0UL);
+    assert(va_arg(args, unsigned long) == 0UL);
     va_end(args);
     errno = bootstrap_errno; /* The output, rather than reboot return, is authoritative. */
     return -1;
@@ -53,7 +60,7 @@ int __wrap_close(int fd)
 int __wrap_ioctl(int fd, unsigned long command, ...)
 {
     va_list args;
-    assert(fd == 17);
+    assert(fd == installed_fd);
     ++ioctl_count;
     va_start(args, command);
     if (command == NBDRIVER_IOC_GET_ABI) {
@@ -101,21 +108,30 @@ int main(void)
     assert(sizeof(info) == 16 && sizeof(r) == 48 && sizeof(w) == 48);
     assert(_IOC_SIZE(NBDRIVER_IOC_READ_PROCESS) == sizeof(r));
     assert(_IOC_SIZE(NBDRIVER_IOC_WRITE_PROCESS) == sizeof(w));
-    assert(nbdriver_open() == 17 && errno == 0);
+    bootstrap_calls=0;assert(nbdriver_open() == 17 && errno == 0);
+    /* Validate every candidate, both range boundaries, reboot last and FD 0. */
+    for (unsigned int i=0;i<=NBDRIVER_INSTALL_CANDIDATE_COUNT;++i) {
+        selected_nr=i<NBDRIVER_INSTALL_CANDIDATE_COUNT?nbdriver_install_candidate(i):NBDRIVER_INSTALL_REBOOT_SYSCALL;
+        bootstrap_calls=0;
+        assert(nbdriver_open()==17&&bootstrap_calls==i+1&&last_nr==selected_nr);
+    }
+    installed_fd=0;selected_nr=423;bootstrap_calls=0;
+    assert(nbdriver_open()==0&&last_nr==423);
+    installed_fd=17;selected_nr=18;
     installed_fd = NBDRIVER_INSTALL_PENDING;
-    assert(nbdriver_open() == -1 && errno == ENODEV);
+    bootstrap_calls=0;assert(nbdriver_open() == -1 && errno == ENODEV);
     bootstrap_errno = EPERM;
-    assert(nbdriver_open() == -1 && errno == EPERM);
+    bootstrap_calls=0;assert(nbdriver_open() == -1 && errno == EPERM);
     bootstrap_errno = EINVAL;
     installed_fd = -EMFILE;
-    assert(nbdriver_open() == -1 && errno == EMFILE);
+    bootstrap_calls=0;assert(nbdriver_open() == -1 && errno == EMFILE);
     installed_fd = -EPERM;
-    assert(nbdriver_open() == -1 && errno == EPERM);
+    bootstrap_calls=0;assert(nbdriver_open() == -1 && errno == EPERM);
     installed_fd = 17;
     abi_error = EIO;
-    assert(nbdriver_open() == -1 && errno == EIO && close_count == 1);
+    bootstrap_calls=0;assert(nbdriver_open() == -1 && errno == EIO && close_count == 1);
     abi_error = 0; abi_mismatch = 1;
-    assert(nbdriver_open() == -1 && errno == EPROTO && close_count == 2);
+    bootstrap_calls=0;assert(nbdriver_open() == -1 && errno == EPROTO && close_count == 2);
     abi_mismatch = 0;
     ioctl_count = close_count = 0;
     assert(nbdriver_get_abi(-1, &info) == -1 && errno == EINVAL);
@@ -164,7 +180,7 @@ int main(void)
     nbdriver_close(17);
     assert(close_count == 1);
 #endif
-    puts("PASS: FD handshake, ABI, validation, partial read, write, multiple translation units");
+    puts("PASS: 150-slot scan, reboot fallback, FD 0, ABI, validation, partial read, write, multiple translation units");
     return 0;
 }
 '''
@@ -272,6 +288,8 @@ def main():
             }.items():
                 for field in fields:
                     expression += f'printf("%zu ", offsetof(struct {structure}, {field}));'
+            expression += 'printf("%u %u ", NBDRIVER_INSTALL_CANDIDATE_COUNT, NBDRIVER_INSTALL_REBOOT_SYSCALL);'
+            expression += 'for (unsigned int i=0;i<NBDRIVER_INSTALL_CANDIDATE_COUNT;++i) printf("%u ",nbdriver_install_candidate(i));'
             outputs = []
             for name, include_dir in [("nbdriver.h", isolated), ("nbdriver_abi.h", ROOT / "include")]:
                 source = isolated / "abi.c"

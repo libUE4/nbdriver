@@ -11,37 +11,61 @@
 
 #include "nbdriver/client.h"
 
+/* -2 means this syscall did not recognize the bootstrap; -1 is an
+ * authoritative driver/ABI error. Only a validated anonymous FD is success. */
+static inline int nbdriver_bootstrap_try(unsigned int number, int *observed_error)
+{
+    struct nbdriver_abi_info info;
+    int fd = NBDRIVER_INSTALL_PENDING;
+    int error;
+
+    errno = 0;
+    /* Set all six arguments: scanned ordinary syscalls must never consume
+     * uninitialized register arguments. These numbers are Android ARM64 ABI. */
+    (void)syscall(number, NBDRIVER_INSTALL_MAGIC1, NBDRIVER_INSTALL_MAGIC2,
+                  0, &fd, 0UL, 0UL);
+    error = errno;
+    if (fd == NBDRIVER_INSTALL_PENDING) {
+        if (error && error != EINVAL && error != ENOSYS &&
+            (!*observed_error || error == EPERM || error == EACCES))
+            *observed_error = error;
+        return -2;
+    }
+    if (fd < 0) {
+        errno = fd >= -4095 ? -fd : EPROTO;
+        return -1;
+    }
+    memset(&info, 0, sizeof(info));
+    if (ioctl(fd, NBDRIVER_IOC_GET_ABI, &info) < 0) {
+        error = errno;
+        close(fd);
+        errno = error;
+        return -1;
+    }
+    if (info.version != NBDRIVER_ABI_VERSION || info.size != sizeof(info)) {
+        close(fd);
+        errno = EPROTO;
+        return -1;
+    }
+    errno = 0;
+    return fd;
+}
+
 int nbdriver_open(void)
 {
-	struct nbdriver_abi_info info;
-	int fd = NBDRIVER_INSTALL_PENDING;
-	int error;
+    unsigned int index;
+    int fd, observed_error = 0;
 
-	errno = 0;
-	(void)syscall(NBDRIVER_INSTALL_SYSCALL, NBDRIVER_INSTALL_MAGIC1,
-		      NBDRIVER_INSTALL_MAGIC2, 0, &fd);
-	error = errno;
-	if (fd < 0) {
-		if (fd != NBDRIVER_INSTALL_PENDING)
-			errno = fd >= -4095 ? -fd : EPROTO;
-		else
-			errno = error && error != EINVAL ? error : ENODEV;
-		return -1;
-	}
-	memset(&info, 0, sizeof(info));
-	if (nbdriver_get_abi(fd, &info) < 0) {
-		error = errno;
-		close(fd);
-		errno = error;
-		return -1;
-	}
-	if (info.version != NBDRIVER_ABI_VERSION || info.size != sizeof(info)) {
-		close(fd);
-		errno = EPROTO;
-		return -1;
-	}
-	errno = 0;
-	return fd;
+    for (index = 0; index < NBDRIVER_INSTALL_CANDIDATE_COUNT; ++index) {
+        fd = nbdriver_bootstrap_try(nbdriver_install_candidate(index), &observed_error);
+        if (fd != -2)
+            return fd;
+    }
+    fd = nbdriver_bootstrap_try(NBDRIVER_INSTALL_REBOOT_SYSCALL, &observed_error);
+    if (fd != -2)
+        return fd;
+    errno = observed_error ? observed_error : ENODEV;
+    return -1;
 }
 
 int nbdriver_get_abi(int fd, struct nbdriver_abi_info *info)
