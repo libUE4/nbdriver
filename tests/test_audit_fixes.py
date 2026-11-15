@@ -157,6 +157,8 @@ AUTH = COMMON + r'''
 #define PTRACE_MODE_ATTACH_FSCREDS 2U
 struct task_struct {int dummy;};struct mm_struct {int dummy;};
 static struct mm_struct mm;static unsigned mode;static bool permit_attach;
+static bool nbdriver_sf_read_caller(void) { return false; }
+static struct mm_struct *get_task_mm(struct task_struct *t) { (void)t;return &mm; }
 static struct mm_struct *access_mm(struct task_struct *t,unsigned m)
 {(void)t;mode=m;return m==PTRACE_MODE_ATTACH_FSCREDS&&!permit_attach?ERR_PTR(-EACCES):&mm;}
 static struct mm_struct *(*nbdriver_mm_access)(struct task_struct *,unsigned)=access_mm;

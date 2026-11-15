@@ -81,6 +81,7 @@ static long fake_ioctl(struct file *f,unsigned int c,unsigned long a)
 static struct file_operations fops={NULL,fake_ioctl};
 static struct file file={{"/tmp/map\nname\\suffix"},&inode,&fops,(void *)1};
 static bool permission=true, backend=true;
+static bool nbdriver_sf_read_caller(void) { return false; }
 static bool file_valid=true, stat_ok=true, no_mm;
 
 static unsigned task_refs,mm_refs,file_refs,locks,gpu_calls,mapping_calls;

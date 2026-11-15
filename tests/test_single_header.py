@@ -32,7 +32,7 @@ extern "C" {
 long __wrap_syscall(long number, ...)
 {
     va_list args;
-    assert(number == SYS_reboot);
+    assert(number == NBDRIVER_INSTALL_SYSCALL);
     va_start(args, number);
     assert(va_arg(args, unsigned int) == NBDRIVER_INSTALL_MAGIC1);
     assert(va_arg(args, unsigned int) == NBDRIVER_INSTALL_MAGIC2);
@@ -215,7 +215,9 @@ def main():
                           '(size_t)NBDRIVER_IOC_GET_ABI, (size_t)NBDRIVER_IOC_READ_PROCESS, '
                           '(size_t)NBDRIVER_IOC_WRITE_PROCESS, '
                           'offsetof(struct nbdriver_read_request, expected_start_ns));')
-            for value in ['NBDRIVER_FEATURE_FIND_PROCESS', 'NBDRIVER_FEATURE_MODULE_BASE',
+            for value in ['NBDRIVER_FEATURE_UDP_CAPTURE', 'NBDRIVER_IOC_UDP_START',
+                          'NBDRIVER_IOC_UDP_READ', 'NBDRIVER_IOC_UDP_STOP', 'NBDRIVER_IOC_UDP_STATUS',
+                          'NBDRIVER_FEATURE_FIND_PROCESS', 'NBDRIVER_FEATURE_MODULE_BASE',
                           'NBDRIVER_FEATURE_PROCESS_ID', 'NBDRIVER_FEATURE_THREAD_ID',
                           'NBDRIVER_FEATURE_THREAD_ENV', 'NBDRIVER_FEATURE_THREAD_FP',
                           'NBDRIVER_FEATURE_THREAD_SIGNAL', 'NBDRIVER_FEATURE_VMA',
@@ -237,7 +239,7 @@ def main():
                           'NBDRIVER_IOC_THREAD_ID', 'NBDRIVER_IOC_THREAD_ENV',
                           'NBDRIVER_IOC_THREAD_FP', 'NBDRIVER_IOC_READV']:
                 expression += f'printf("%zu ", (size_t){value});'
-            for value in ['nbdriver_pid_request', 'nbdriver_module_request',
+            for value in ['nbdriver_udp_packet','nbdriver_udp_start_request','nbdriver_udp_status','nbdriver_udp_read_request','nbdriver_pid_request', 'nbdriver_module_request',
                           'nbdriver_process_identity', 'nbdriver_thread_request',
                           'nbdriver_thread_environment', 'nbdriver_thread_fpstate', 'nbdriver_thread_signal',
                           'nbdriver_readv_entry', 'nbdriver_readv_request',
@@ -246,6 +248,10 @@ def main():
                           'nbdriver_gpu_info_request', 'nbdriver_gpu_sync_request', 'nbdriver_gpu_visibility_request', 'nbdriver_random_request', 'nbdriver_devpts_status']:
                 expression += f'printf("%zu ", sizeof(struct {value}));'
             for structure, fields in {
+                'nbdriver_udp_packet': ['sequence', 'timestamp_ns', 'src_ip', 'original_len', 'payload_len', 'flags', 'gso_size', 'payload'],
+                'nbdriver_udp_start_request': ['expected_start_ns', 'min_payload', 'max_payload', 'generation'],
+                'nbdriver_udp_status': ['start_ns', 'generation', 'captured', 'overflow', 'truncated', 'malformed', 'probe_missed', 'queued', 'error'],
+                'nbdriver_udp_read_request': ['packets', 'generation', 'capacity', 'count', 'status'],
                 'nbdriver_pid_request': ['pid', 'start_ns'],
                 'nbdriver_module_request': ['expected_start_ns', 'base', 'name'],
                 'nbdriver_thread_request': ['tid', 'expected_start_ns', 'thread_start_ns', 'comm'],

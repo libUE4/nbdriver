@@ -8,6 +8,8 @@ root = Path(__file__).resolve().parents[1]
 source = (root/'src/nbdriver_features.c').read_text()
 source = source.split('/* ===== BEGIN src/features/nbdriver_metadata.c ===== */', 1)[1].split('/* ===== END src/features/nbdriver_metadata.c ===== */', 1)[0]
 source = re.sub(r'^#include[^\n]*\n', '', source, flags=re.M)
+# Proc hooks are outside the extracted metadata section; exclude their forward declarations.
+source = re.sub(r'^static (?:bool|int|void|u32) nbdriver_proc_[^;]+;\n', '', source, flags=re.M)
 with tempfile.TemporaryDirectory(prefix='nbdriver-metadata-') as directory:
     temp = Path(directory)
     (temp/'metadata_dispatch.inc').write_text(source)

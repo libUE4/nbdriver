@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <errno.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -125,4 +127,70 @@ int nbdriver_write_process(int fd, struct nbdriver_write_request *request)
 	request->error = 0;
 	request->failed_address = 0;
 	return ioctl(fd, NBDRIVER_IOC_WRITE_PROCESS, request);
+}
+
+/* UDP capture is raw downlink data, not coordinate decryption. One driver FD
+ * owns one active capture; use poll(fd, POLLIN, timeout) to avoid busy waits.
+ * STOP/final close discards its queue. A failed read may be retried: sequence
+ * numbers let consumers discard partially copied duplicate records. */
+int nbdriver_udp_capture_start(int fd, int pid,
+    nbdriver_u32 min_payload, nbdriver_u32 max_payload,
+    nbdriver_u64 expected_start_ns, struct nbdriver_udp_start_request *out)
+{
+    nbdriver_u32 minimum = min_payload ? min_payload : 16;
+    nbdriver_u32 maximum = max_payload ? max_payload : NBDRIVER_UDP_MAX_PAYLOAD;
+    if (!out) { errno = EINVAL; return -1; }
+    memset(out, 0, sizeof(*out));
+    if (fd < 0 || pid <= 0 || maximum > NBDRIVER_UDP_MAX_PAYLOAD || minimum > maximum) {
+        errno = EINVAL; return -1;
+    }
+    out->pid = pid;
+    out->min_payload = minimum;
+    out->max_payload = maximum;
+    out->expected_start_ns = expected_start_ns;
+    if (ioctl(fd, NBDRIVER_IOC_UDP_START, out) < 0) return -1;
+    if (!out->generation || !out->expected_start_ns || out->pid != pid) {
+        errno = EPROTO; return -1;
+    }
+    return 0;
+}
+
+/* Returns number of records, zero for an empty queue, or -1/errno. */
+int nbdriver_udp_capture_read(int fd, struct nbdriver_udp_packet *packets,
+    nbdriver_u32 capacity, nbdriver_u64 generation, struct nbdriver_udp_status *status)
+{
+    struct nbdriver_udp_read_request request;
+    int result;
+    if (status) memset(status, 0, sizeof(*status));
+    if (fd < 0 || !packets || !generation || !capacity || capacity > NBDRIVER_UDP_READ_MAX) {
+        errno = EINVAL; return -1;
+    }
+    memset(&request, 0, sizeof(request));
+    request.packets = (nbdriver_u64)(uintptr_t)packets;
+    request.generation = generation;
+    request.capacity = capacity;
+    result = ioctl(fd, NBDRIVER_IOC_UDP_READ, &request);
+    if (status) *status = request.status;
+    if (result < 0) return -1;
+    if (request.count > capacity || request.status.size != sizeof(request.status) ||
+        request.status.generation != generation || request.status.error) {
+        errno = EPROTO; return -1;
+    }
+    return (int)request.count;
+}
+
+int nbdriver_udp_capture_status(int fd, struct nbdriver_udp_status *out)
+{
+    if (!out) { errno = EINVAL; return -1; }
+    memset(out, 0, sizeof(*out));
+    if (fd < 0) { errno = EINVAL; return -1; }
+    if (ioctl(fd, NBDRIVER_IOC_UDP_STATUS, out) < 0) return -1;
+    if (out->size != sizeof(*out)) { errno = EPROTO; return -1; }
+    return 0;
+}
+
+int nbdriver_udp_capture_stop(int fd)
+{
+    if (fd < 0) { errno = EINVAL; return -1; }
+    return ioctl(fd, NBDRIVER_IOC_UDP_STOP, 0);
 }

@@ -22,6 +22,7 @@
 #ifndef NBDRIVER_ABI_H
 #define NBDRIVER_ABI_H
 
+typedef uint16_t nbdriver_u16;
 typedef uint32_t nbdriver_u32;
 typedef int32_t nbdriver_s32;
 typedef uint64_t nbdriver_u64;
@@ -402,6 +403,78 @@ struct nbdriver_gpu_visibility_request {
     _IOWR(NBDRIVER_IOC_MAGIC, 0x20, struct nbdriver_gpu_sync_request)
 #define NBDRIVER_IOC_GPU_VISIBILITY \
     _IOWR(NBDRIVER_IOC_MAGIC, 0x21, struct nbdriver_gpu_visibility_request)
+
+/* Downlink capture, additive ABI 5. Payloads stay encrypted/raw. IPv4
+ * addresses are network order; ports and other integers are host order.
+ * UID matching includes every socket with the target's real UID; it is not
+ * proof that a socket belongs exclusively to one PID. */
+#define NBDRIVER_FEATURE_UDP_CAPTURE (1U << 23)
+#define NBDRIVER_UDP_MAX_PAYLOAD 2048U
+#define NBDRIVER_UDP_RING_SIZE 256U
+#define NBDRIVER_UDP_READ_MAX 32U
+#define NBDRIVER_UDP_F_TRUNCATED (1U << 0)
+#define NBDRIVER_UDP_F_GRO (1U << 1)
+
+struct nbdriver_udp_packet {
+    nbdriver_u64 sequence;
+    nbdriver_u64 timestamp_ns;
+    nbdriver_u32 src_ip;
+    nbdriver_u32 dst_ip;
+    nbdriver_u32 socket_uid;
+    nbdriver_u32 original_len;
+    nbdriver_u16 src_port;
+    nbdriver_u16 dst_port;
+    nbdriver_u16 payload_len;
+    nbdriver_u16 flags;
+    nbdriver_u16 gso_size;
+    nbdriver_u16 reserved;
+    nbdriver_u32 reserved2;
+    unsigned char payload[NBDRIVER_UDP_MAX_PAYLOAD];
+};
+
+struct nbdriver_udp_start_request {
+    nbdriver_s32 pid;
+    nbdriver_u32 reserved;
+    nbdriver_u64 expected_start_ns;
+    nbdriver_u32 min_payload; /* zero selects 16 */
+    nbdriver_u32 max_payload; /* zero selects MAX_PAYLOAD; larger packets truncate */
+    nbdriver_u64 generation;  /* input zero; output fresh session identity */
+};
+
+struct nbdriver_udp_status {
+    nbdriver_u32 size;
+    nbdriver_u32 active;
+    nbdriver_s32 pid;
+    nbdriver_u32 uid;
+    nbdriver_u64 start_ns;
+    nbdriver_u64 generation;
+    nbdriver_u64 captured;
+    nbdriver_u64 overflow;   /* ring overwrote oldest queued record */
+    nbdriver_u64 truncated;
+    nbdriver_u64 malformed;
+    nbdriver_u64 probe_missed;
+    nbdriver_u64 sample_ns;
+    nbdriver_u32 queued;    /* ring plus detached records awaiting successful read */
+    nbdriver_u32 min_payload;
+    nbdriver_u32 max_payload;
+    nbdriver_s32 error;
+};
+
+struct nbdriver_udp_read_request {
+    nbdriver_u64 packets;
+    nbdriver_u64 generation; /* must match START; never merges sessions */
+    nbdriver_u32 capacity;
+    nbdriver_u32 count;
+    struct nbdriver_udp_status status;
+};
+
+#define NBDRIVER_IOC_UDP_START \
+    _IOWR(NBDRIVER_IOC_MAGIC, 0x25, struct nbdriver_udp_start_request)
+#define NBDRIVER_IOC_UDP_READ \
+    _IOWR(NBDRIVER_IOC_MAGIC, 0x26, struct nbdriver_udp_read_request)
+#define NBDRIVER_IOC_UDP_STOP _IO(NBDRIVER_IOC_MAGIC, 0x27)
+#define NBDRIVER_IOC_UDP_STATUS \
+    _IOR(NBDRIVER_IOC_MAGIC, 0x28, struct nbdriver_udp_status)
 
 #endif /* NBDRIVER_ABI_H */
 
@@ -933,6 +1006,72 @@ static inline int nbdriver_read_random(int fd, void *buffer, size_t size)
 		return -1;
 	}
 	return (int)request.copied;
+}
+
+/* UDP capture is raw downlink data, not coordinate decryption. One driver FD
+ * owns one active capture; use poll(fd, POLLIN, timeout) to avoid busy waits.
+ * STOP/final close discards its queue. A failed read may be retried: sequence
+ * numbers let consumers discard partially copied duplicate records. */
+static inline int nbdriver_udp_capture_start(int fd, int pid,
+    nbdriver_u32 min_payload, nbdriver_u32 max_payload,
+    nbdriver_u64 expected_start_ns, struct nbdriver_udp_start_request *out)
+{
+    nbdriver_u32 minimum = min_payload ? min_payload : 16;
+    nbdriver_u32 maximum = max_payload ? max_payload : NBDRIVER_UDP_MAX_PAYLOAD;
+    if (!out) { errno = EINVAL; return -1; }
+    memset(out, 0, sizeof(*out));
+    if (fd < 0 || pid <= 0 || maximum > NBDRIVER_UDP_MAX_PAYLOAD || minimum > maximum) {
+        errno = EINVAL; return -1;
+    }
+    out->pid = pid;
+    out->min_payload = minimum;
+    out->max_payload = maximum;
+    out->expected_start_ns = expected_start_ns;
+    if (ioctl(fd, NBDRIVER_IOC_UDP_START, out) < 0) return -1;
+    if (!out->generation || !out->expected_start_ns || out->pid != pid) {
+        errno = EPROTO; return -1;
+    }
+    return 0;
+}
+
+/* Returns number of records, zero for an empty queue, or -1/errno. */
+static inline int nbdriver_udp_capture_read(int fd, struct nbdriver_udp_packet *packets,
+    nbdriver_u32 capacity, nbdriver_u64 generation, struct nbdriver_udp_status *status)
+{
+    struct nbdriver_udp_read_request request;
+    int result;
+    if (status) memset(status, 0, sizeof(*status));
+    if (fd < 0 || !packets || !generation || !capacity || capacity > NBDRIVER_UDP_READ_MAX) {
+        errno = EINVAL; return -1;
+    }
+    memset(&request, 0, sizeof(request));
+    request.packets = (nbdriver_u64)(uintptr_t)packets;
+    request.generation = generation;
+    request.capacity = capacity;
+    result = ioctl(fd, NBDRIVER_IOC_UDP_READ, &request);
+    if (status) *status = request.status;
+    if (result < 0) return -1;
+    if (request.count > capacity || request.status.size != sizeof(request.status) ||
+        request.status.generation != generation || request.status.error) {
+        errno = EPROTO; return -1;
+    }
+    return (int)request.count;
+}
+
+static inline int nbdriver_udp_capture_status(int fd, struct nbdriver_udp_status *out)
+{
+    if (!out) { errno = EINVAL; return -1; }
+    memset(out, 0, sizeof(*out));
+    if (fd < 0) { errno = EINVAL; return -1; }
+    if (ioctl(fd, NBDRIVER_IOC_UDP_STATUS, out) < 0) return -1;
+    if (out->size != sizeof(*out)) { errno = EPROTO; return -1; }
+    return 0;
+}
+
+static inline int nbdriver_udp_capture_stop(int fd)
+{
+    if (fd < 0) { errno = EINVAL; return -1; }
+    return ioctl(fd, NBDRIVER_IOC_UDP_STOP, 0);
 }
 
 #ifdef __cplusplus

@@ -14,4 +14,12 @@ int nbdriver_load_module_path(const char *path, const char *parameters);
 int nbdriver_read_process(int fd, struct nbdriver_read_request *request);
 int nbdriver_write_process(int fd, struct nbdriver_write_request *request);
 
+int nbdriver_udp_capture_start(int fd, int pid, nbdriver_u32 min_payload,
+    nbdriver_u32 max_payload, nbdriver_u64 expected_start_ns,
+    struct nbdriver_udp_start_request *out);
+int nbdriver_udp_capture_read(int fd, struct nbdriver_udp_packet *packets,
+    nbdriver_u32 capacity, nbdriver_u64 generation, struct nbdriver_udp_status *status);
+int nbdriver_udp_capture_status(int fd, struct nbdriver_udp_status *out);
+int nbdriver_udp_capture_stop(int fd);
+
 #endif /* NBDRIVER_CLIENT_H */

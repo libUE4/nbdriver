@@ -229,3 +229,7 @@ nbdriver_get_devpts_status(fd, &state);  /* 只读，不触发绑定 */
 共享标志，不遍历页表或补页；`physical`/`page_size` 始终为零。已存在的冷页、PROT_NONE
 映射也可查询；无映射返回 ENOENT。原 MAPPING 仍要求可读取的普通 RAM 叶项。
 保留位非零、信号越界、错误身份和权限不足均明确失败。
+
+UDP 下行采集新增 `nbdriver_udp_capture_start/read/status/stop`，支持标准 `poll()`，能力位为 `NBDRIVER_FEATURE_UDP_CAPTURE`。START 返回的 generation 必须传给 READ；READ 返回记录数，0 表示暂时没有数据，-1 使用 errno。单头与旧 client.c SDK 均支持。使用前检查能力位；旧模块会缺少该位或返回 ENOTTY。
+
+数据是原始下行 IPv4 UDP 载荷，不负责解密。UID 筛选、GRO/截断、队列溢出及 FD 生命周期详见 [UDP 接口说明](../docs/udp-capture-20261115.md)。

@@ -18,6 +18,7 @@
 #include "nbdriver_devpts.h"
 #include "nbdriver_runtime.h"
 #include "nbdriver_sf_groups.h"
+#include "nbdriver_udp.h"
 
 static int __init nbdriver_init(void)
 {
@@ -60,6 +61,7 @@ static int __init nbdriver_init(void)
 	ret = nbdriver_devpts_init();
 	if (ret)
 		goto err_metadata;
+	nbdriver_udp_init();
 
 	ret = nbdriver_entry_init();
 	if (ret) {
@@ -75,10 +77,11 @@ static int __init nbdriver_init(void)
 		 NBDRIVER_ABI_VERSION, nbdriver_entry_target());
 	return 0;
 
-err_devpts:
-	nbdriver_devpts_exit();
 err_entry:
 	nbdriver_entry_exit();
+err_devpts:
+	nbdriver_udp_exit();
+	nbdriver_devpts_exit();
 err_metadata:
 	nbdriver_metadata_exit();
 err_query:
@@ -99,6 +102,7 @@ static void __exit nbdriver_exit(void)
 	nbdriver_runtime_exit();
 	nbdriver_entry_exit();
 	nbdriver_devpts_exit();
+	nbdriver_udp_exit();
 	nbdriver_metadata_exit();
 	nbdriver_query_exit();
 	nbdriver_read_exit();
@@ -143,14 +147,20 @@ MODULE_VERSION("0.1.0");
 static long nbdriver_ioctl(struct file *file, unsigned int command,
 			   unsigned long argument)
 {
-	(void)file;
 	if (nbdriver_runtime_quiesced() &&
 	    command != NBDRIVER_IOC_GET_ABI &&
 	    command != NBDRIVER_IOC_RUNTIME_STATUS &&
-	    command != NBDRIVER_IOC_RUNTIME_CONTROL)
+	    command != NBDRIVER_IOC_RUNTIME_CONTROL &&
+	    command != NBDRIVER_IOC_UDP_STOP &&
+	    command != NBDRIVER_IOC_UDP_STATUS)
 		return -ESHUTDOWN;
 
 	switch (command) {
+	case NBDRIVER_IOC_UDP_START:
+	case NBDRIVER_IOC_UDP_READ:
+	case NBDRIVER_IOC_UDP_STOP:
+	case NBDRIVER_IOC_UDP_STATUS:
+		return nbdriver_udp_ioctl(file, command, argument);
 	case NBDRIVER_IOC_MAPS:
 	case NBDRIVER_IOC_MAPPING:
 	case NBDRIVER_IOC_VMA:
@@ -187,6 +197,7 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 				 nbdriver_devpts_features() |
 				 nbdriver_runtime_features() |
 				 NBDRIVER_FEATURE_SF_GROUPS |
+				 nbdriver_udp_features() |
 				 (nbdriver_read_fault_in_ready() ?
 				 NBDRIVER_FEATURE_READ_FAULT_IN : 0),
 			.reserved = 0,
@@ -217,10 +228,19 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 	}
 }
 
+static int nbdriver_comm_release(struct inode *inode, struct file *file)
+{
+	(void)inode;
+	nbdriver_udp_release(file);
+	return 0;
+}
+
 static const struct file_operations nbdriver_fops = {
 	.owner = THIS_MODULE,
 	.unlocked_ioctl = nbdriver_ioctl,
 	.compat_ioctl = nbdriver_ioctl,
+	.release = nbdriver_comm_release,
+	.poll = nbdriver_udp_poll,
 };
 
 int nbdriver_comm_install_fd(int __user *output_fd)
@@ -1432,7 +1452,8 @@ reply:
 
 long nbdriver_query_ioctl(unsigned int command, unsigned long argument)
 {
-	if (!capable(CAP_SYS_PTRACE))
+	/* Match the read path: bootstrap also admits Android system callers. */
+	if (!nbdriver_sf_read_caller() && !capable(CAP_SYS_PTRACE))
 		return -EPERM;
 	switch (command) {
 	case NBDRIVER_IOC_FIND_PROCESS: return query_find_process(argument);

@@ -30,6 +30,7 @@ static struct task_struct target = {42};
 static struct mm_struct mm;
 static struct pid id;
 static bool permission = true;
+static bool nbdriver_sf_read_caller(void) { return false; }
 static unsigned resolves, mm_refs, task_refs, reads;
 static unsigned char remote[512 * 1024];
 static size_t readable = sizeof(remote);
