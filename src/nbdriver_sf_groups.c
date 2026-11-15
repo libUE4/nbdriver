@@ -1,11 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include <linux/cred.h>
 #include <linux/atomic.h>
+#include <linux/build_bug.h>
 #include <linux/dcache.h>
 #include <linux/errno.h>
 #include <linux/file.h>
 #include <linux/limits.h>
 #include <linux/mm.h>
+#include <linux/refcount.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -147,7 +149,17 @@ static void nbdriver_log_group_state(const char *stage, u32 mask)
 static noinline void NBDRIVER_NO_CFI
 nbdriver_put_group_info(struct group_info *groups)
 {
-	if (atomic_dec_and_test(&groups->usage))
+	bool last;
+
+	/* Select by the actual header type, including vendor backports.  Only
+	 * the selected expression is emitted, preserving refcount saturation. */
+	BUILD_BUG_ON(!__builtin_types_compatible_p(__typeof__(groups->usage), atomic_t) &&
+		     !__builtin_types_compatible_p(__typeof__(groups->usage), refcount_t));
+	last = __builtin_choose_expr(
+		__builtin_types_compatible_p(__typeof__(groups->usage), refcount_t),
+		refcount_dec_and_test((refcount_t *)&groups->usage),
+		atomic_dec_and_test((atomic_t *)&groups->usage));
+	if (last)
 		nbdriver_groups_free_ptr(groups);
 }
 

@@ -897,7 +897,9 @@ long nbdriver_readv_ioctl(unsigned long argument)
 
 #define NBDRIVER_FIND_MAX_TASKS 512U
 static __typeof__(&ptrace_may_access) query_access;
-static __typeof__(&task_call_func) query_task_call;
+/* Older DDK headers do not declare this optional scheduler helper. */
+static int (*query_task_call)(struct task_struct *,
+			      int (*)(struct task_struct *, void *), void *);
 static __typeof__(&__lock_task_sighand) query_lock_sighand;
 
 int nbdriver_query_init(void)

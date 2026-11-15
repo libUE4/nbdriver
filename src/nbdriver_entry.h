@@ -2,6 +2,11 @@
 #ifndef NBDRIVER_ENTRY_H
 #define NBDRIVER_ENTRY_H
 
+struct module;
+struct callback_head;
+/* Called by the assembly task_work trampoline; it must remain visible. */
+struct module *nbdriver_fd_work_run(struct callback_head *head);
+
 /*
  * 首次取 FD 的入口。reboot 探针是唯一跨 5.10-6.18 可用的形态：
  *   - sys_call_table 槽位改写要写内核文本段，缺可用的导出符号

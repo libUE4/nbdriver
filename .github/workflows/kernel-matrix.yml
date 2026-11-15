@@ -74,10 +74,11 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -Isdk/include \
             tests/device_metadata_smoke.c -o /tmp/nbdriver-metadata-probe
 
-      - name: Check query authorization and UDP capture
+      - name: Check query authorization, group references and UDP capture
         run: |
           set -euo pipefail
           python3 tests/test_query_authorization.py
+          python3 tests/test_sf_groups.py
           python3 tests/test_udp_capture.py
           python3 tests/test_udp_sdk.py
 
