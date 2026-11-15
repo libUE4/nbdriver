@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the actual kernel read loop with bounded synthetic VMAs/pages."""
 from pathlib import Path
-import subprocess,tempfile,os
+import subprocess,tempfile,os,shutil
 root=Path(__file__).resolve().parents[1]
 s=(root/'src/nbdriver_core.c').read_text()
 s=s[s.index('static int nbdriver_read_mm_inner('):s.index('\nint nbdriver_read_mm_locked(')]
@@ -130,5 +130,5 @@ int main(void){
 with tempfile.TemporaryDirectory(prefix='nbdriver-read-permissions-') as d:
  p=Path(d);(p/'read_loop.inc').write_text(s);(p/'test.c').write_text(harness)
  for version in (0x050a00,0x060600):
-  subprocess.run([os.environ.get('CC','clang-18'),'-std=gnu11','-O1','-Wall','-Wextra','-Werror','-Wno-unused-function','-DTEST_VERSION='+str(version),'-I'+str(root/'include'),'-I'+str(p),str(p/'test.c'),'-o',str(p/'test')],check=True)
+  subprocess.run([os.environ.get('CC') or shutil.which('clang') or shutil.which('clang-18') or 'cc','-std=gnu11','-O1','-Wall','-Wextra','-Werror','-Wno-unused-function','-DTEST_VERSION='+str(version),'-I'+str(root/'include'),'-I'+str(p),str(p/'test.c'),'-o',str(p/'test')],check=True)
   subprocess.run([str(p/'test')],check=True)
