@@ -3,6 +3,7 @@
 #include <linux/cred.h>
 #include <linux/errno.h>
 #include <linux/kprobes.h>
+#include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/ptrace.h>
 #include <linux/sched.h>
@@ -109,6 +110,7 @@ static int nbdriver_sf_pre(struct kprobe *probe, struct pt_regs *regs)
 	(void)probe;
 	syscall_regs = (const struct pt_regs *)(unsigned long)regs->regs[0];
 	if (!syscall_regs ||
+	    syscall_regs->syscallno != NBDRIVER_INSTALL_SYSCALL ||
 	    (u32)syscall_regs->regs[0] != NBDRIVER_INSTALL_MAGIC1 ||
 	    (u32)syscall_regs->regs[1] != NBDRIVER_INSTALL_MAGIC2)
 		return 0;
@@ -122,6 +124,11 @@ static int nbdriver_sf_pre(struct kprobe *probe, struct pt_regs *regs)
 
 int nbdriver_sf_entry_init(void)
 {
+	static const char *const targets[] = {
+		"__arm64_sys_lookup_dcookie",
+		"__arm64_sys_ni_syscall",
+	};
+	unsigned int index;
 	int ret;
 
 	nbdriver_task_work_add_fn =
@@ -129,19 +136,29 @@ int nbdriver_sf_entry_init(void)
 	if (!nbdriver_task_work_add_fn)
 		return -ENOENT;
 
-	memset(&nbdriver_sf_probe, 0, sizeof(nbdriver_sf_probe));
-	nbdriver_sf_probe.symbol_name = "__arm64_sys_lookup_dcookie";
-	nbdriver_sf_probe.pre_handler = nbdriver_sf_pre;
-	ret = register_kprobe(&nbdriver_sf_probe);
-	if (ret) {
-		nbd_err("stage=syscall18_probe operation=register error=%d\n", ret);
+	/* Newer syscall tables route the removed lookup_dcookie slot to the
+	 * not-implemented wrapper. Both wrappers take struct pt_regs *. Only
+	 * try that alternative when the legacy target is absent; permission or
+	 * probe restrictions remain failures. The pre-handler checks syscall 18
+	 * so other not-implemented syscalls cannot schedule FD installation. */
+	for (index = 0; index < ARRAY_SIZE(targets); ++index) {
 		memset(&nbdriver_sf_probe, 0, sizeof(nbdriver_sf_probe));
-		return ret;
+		nbdriver_sf_probe.symbol_name = targets[index];
+		nbdriver_sf_probe.pre_handler = nbdriver_sf_pre;
+		ret = register_kprobe(&nbdriver_sf_probe);
+		if (!ret) {
+			nbdriver_sf_probe_symbol = targets[index];
+			nbd_info("stage=syscall18_probe status=registered target=%s\n",
+				nbdriver_sf_probe_symbol);
+			return 0;
+		}
+		nbd_warn("stage=syscall18_probe operation=register target=%s error=%d\n",
+			targets[index], ret);
+		memset(&nbdriver_sf_probe, 0, sizeof(nbdriver_sf_probe));
+		if (ret != -ENOENT)
+			return ret;
 	}
-	nbdriver_sf_probe_symbol = nbdriver_sf_probe.symbol_name;
-	nbd_info("stage=syscall18_probe status=registered target=%s\n",
-		nbdriver_sf_probe_symbol);
-	return 0;
+	return -ENOENT;
 }
 
 void nbdriver_sf_entry_exit(void)
@@ -353,4 +370,3 @@ void nbdriver_log_missing_once(const char *stage, const char *symbol, int error)
 		stage ? stage : "(null)", name, error);
 }
 /* ===== END src/platform/nbdriver_log.c ===== */
-

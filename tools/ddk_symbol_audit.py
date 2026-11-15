@@ -19,6 +19,7 @@ SYMBOLS = [
     "__arm64_sys_reboot", "__se_sys_reboot", "__arch_copy_to_user",
     "mm_access", "fixup_user_fault", "zero_pfn", "copy_to_user_page",
     "init_user_ns", "get_task_cred", "__put_cred", "task_uid",
+    "__arm64_sys_lookup_dcookie", "__arm64_sys_ni_syscall",
 ]
 SOURCE_PATHS = [
     "Makefile", "kernel/kallsyms.c", "kernel/task_work.c", "kernel/kprobes.c",
@@ -29,6 +30,7 @@ SOURCE_PATHS = [
     "include/linux/task_work.h", "android/abi_gki_aarch64_generic",
     "include/linux/cred.h", "include/linux/user_namespace.h",
     "kernel/cred.c", "kernel/user.c", "kernel/user_namespace.c",
+    "scripts/syscall.tbl", "include/uapi/asm-generic/unistd.h",
     "android/abi_gki_aarch64_qcom",
 ]
 CONFIGS = [
