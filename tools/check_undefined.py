@@ -74,6 +74,8 @@ def main():
         "copy_to_kernel_nofault", "__arm64_sys_reboot",
         # Observed absent from vendor 6.1.141 exports despite the DDK export.
         "xas_find_marked",
+        # Observed absent in Android 12 vendor 5.10 module exports.
+        "init_user_ns", "get_task_cred", "__put_cred",
     }
     missing = [name for name in imports if name not in exports or name in protected]
 

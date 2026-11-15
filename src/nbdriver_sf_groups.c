@@ -71,7 +71,11 @@ static bool nbdriver_sf_system_credentials(const struct cred *cred)
 {
 	kuid_t system_uid = KUIDT_INIT(NBDRIVER_AID_SYSTEM);
 
-	return cred->user_ns == &init_user_ns &&
+	/* The initial user namespace is the only level-zero namespace and has
+	 * no parent. Preserve that restriction without importing init_user_ns,
+	 * which some vendor kernels do not export to modules. */
+	return cred->user_ns && !cred->user_ns->parent &&
+		cred->user_ns->level == 0 &&
 		uid_eq(cred->uid, system_uid) &&
 		uid_eq(cred->euid, system_uid) &&
 		uid_eq(cred->suid, system_uid) &&

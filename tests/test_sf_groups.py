@@ -10,6 +10,8 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 source = (root / 'src/nbdriver_sf_groups.c').read_text()
+credentials_start = source.index('static bool nbdriver_sf_system_credentials(')
+credentials_end = source.index('static noinline bool NBDRIVER_NO_CFI nbdriver_is_surfaceflinger(', credentials_start)
 start = source.index('static noinline void NBDRIVER_NO_CFI\nnbdriver_put_group_info(')
 end = source.index('static noinline int NBDRIVER_NO_CFI\nnbdriver_append_groups(', start)
 harness = r'''
@@ -37,10 +39,28 @@ static bool refcount_dec_and_test(refcount_t *value)
 { assert(REFCOUNT_MODE == 1);++refcount_calls;if(value->refs == INT_MAX)return false;assert(value->refs > 0);return --value->refs == 0; }
 static void groups_free(struct group_info *group) { assert(group);++frees; }
 static void (*nbdriver_groups_free_ptr)(struct group_info *) = groups_free;
+typedef unsigned int kuid_t;
+#define KUIDT_INIT(x) (x)
+#define NBDRIVER_AID_SYSTEM 1000U
+#define uid_eq(a,b) ((a)==(b))
+struct user_namespace { struct user_namespace *parent; int level; };
+struct cred { struct user_namespace *user_ns; kuid_t uid,euid,suid,fsuid; };
 '''
 harness += source[start:end]
+harness += source[credentials_start:credentials_end]
 harness += r'''
 int main(void) {
+ struct user_namespace initial = {NULL,0}, child = {&initial,1};
+ struct cred system = {&initial,1000,1000,1000,1000};
+ assert(nbdriver_sf_system_credentials(&system));
+ kuid_t *ids[] = {&system.uid,&system.euid,&system.suid,&system.fsuid};
+ for (unsigned i=0;i<4;++i) {
+  *ids[i]=1001;assert(!nbdriver_sf_system_credentials(&system));*ids[i]=1000;
+ }
+ system.user_ns=&child;assert(!nbdriver_sf_system_credentials(&system));
+ child.level=0;assert(!nbdriver_sf_system_credentials(&system));
+ child.parent=NULL;child.level=1;assert(!nbdriver_sf_system_credentials(&system));
+ system.user_ns=NULL;assert(!nbdriver_sf_system_credentials(&system));
  struct group_info success = { {2} }, failure = { {1} };
  nbdriver_put_group_info(&success);assert(frees == 0);
  nbdriver_put_group_info(&success);assert(frees == 1);
@@ -52,7 +72,7 @@ int main(void) {
 #else
  assert(atomic_calls == 3 && refcount_calls == 0);
 #endif
- puts("PASS group refs: allocation reference, retained credential reference, final release, correct counter family");
+ puts("PASS group refs and system credential gate: allocation/retained/final references, counter family, initial namespace only, all four UIDs checked");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='nbdriver-group-refs-') as directory:

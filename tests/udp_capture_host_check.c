@@ -55,7 +55,7 @@ static struct mm_struct target_mm={1,1},other_mm={1,1};
 static struct task_struct task={42,0,&target_mm,true};
 static struct cred creds={23456};
 static struct pid target_pid={123};
-static int task_refs,pid_refs,cred_refs;
+static int task_refs,pid_refs,uid_reads;
 static int caller_uid,allow_cap,deny_mm;
 static bool quiesced;
 static struct pid *find_get_pid(int pid){if(pid!=123)return NULL;++pid_refs;return &target_pid;}
@@ -67,8 +67,8 @@ static struct mm_struct *nbdriver_access_mm(struct task_struct *t){assert(t==&ta
 static void mmgrab(struct mm_struct *m){++m->refs;}
 static void mmput(struct mm_struct *m){assert(m->users>0);--m->users;}
 static void mmdrop(struct mm_struct *m){assert(m->refs>1);--m->refs;}
-static const struct cred *get_task_cred(struct task_struct *t){assert(t==&task);++cred_refs;return &creds;}
-static void put_cred(const struct cred *c){assert(c==&creds&&cred_refs>0);--cred_refs;}
+/* Model the value snapshot returned by the kernel's RCU task_uid() macro. */
+static kuid_t task_uid(struct task_struct *t){assert(t==&task&&task_refs>0);++uid_reads;return creds.uid;}
 static bool nbdriver_sf_read_caller(void){return caller_uid==0||caller_uid==1000;}
 static bool capable(int cap){assert(cap==CAP_SYS_PTRACE);return allow_cap;}
 static bool nbdriver_runtime_quiesced(void){return quiesced;}
@@ -121,7 +121,7 @@ struct sk_buff {unsigned short protocol;unsigned int len;int transport;bool gro,
 static int skb_copy_bits(struct sk_buff *skb,int offset,void *out,int n){assert(!spin_depth);if(skb->copy_error||offset<0||(unsigned int)(offset+n)>skb->len)return -EFAULT;memcpy(out,skb->bytes+offset,n);return 0;}
 #include "udp_production.inc"
 static struct file owner={1},other={2};
-static void no_resources(void){assert(!udp_active&&!registered&&!allocations&&!task_refs&&!pid_refs&&!cred_refs&&target_mm.users==1&&target_mm.refs==1);}
+static void no_resources(void){assert(!udp_active&&!registered&&!allocations&&!task_refs&&!pid_refs&&target_mm.users==1&&target_mm.refs==1);}
 static long start(struct file *f,struct nbdriver_udp_start_request *r){return nbdriver_udp_ioctl(f,NBDRIVER_IOC_UDP_START,(unsigned long)r);}
 static long stop(struct file *f){return nbdriver_udp_ioctl(f,NBDRIVER_IOC_UDP_STOP,0);}
 static struct nbdriver_udp_start_request new_start(void){struct nbdriver_udp_start_request r={.pid=123,.expected_start_ns=42};assert(!start(&owner,&r)&&r.generation&&r.max_payload==2048);return r;}
@@ -135,6 +135,7 @@ int main(void){
  registration_error=0;nbdriver_udp_init();assert(nbdriver_udp_features()==NBDRIVER_FEATURE_UDP_CAPTURE&&!registered);
  registration_error=-EBUSY;r=(struct nbdriver_udp_start_request){.pid=123};assert(start(&owner,&r)==-EBUSY);registration_error=0;no_resources();
  caller_uid=1000;r=new_start();assert(!stop(&owner));no_resources();caller_uid=10001;allow_cap=1;r=new_start();assert(!stop(&owner));no_resources();allow_cap=0;caller_uid=0;
+ int previous_reads=uid_reads;r=new_start();assert(uid_reads==previous_reads+1&&udp_active->uid==creds.uid);kuid_t saved_uid=creds.uid;++creds.uid;assert(udp_active->uid==saved_uid);creds.uid=saved_uid;assert(!stop(&owner));no_resources();
  assert(start(&owner,NULL)==-EFAULT);r=(struct nbdriver_udp_start_request){.pid=-1};assert(start(&owner,&r)==-EINVAL);r.pid=123;r.min_payload=2049;assert(start(&owner,&r)==-EINVAL);r.min_payload=0;r.expected_start_ns=43;assert(start(&owner,&r)==-ESTALE);no_resources();r.expected_start_ns=42;
  deny_mm=1;assert(start(&owner,&r)==-EACCES);deny_mm=0;no_resources();
  for(int i=0;i<4;++i){alloc_budget=i;assert(start(&owner,&r)==-ENOMEM);no_resources();}alloc_budget=-1;

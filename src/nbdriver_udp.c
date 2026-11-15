@@ -207,7 +207,6 @@ static struct nbdriver_udp_capture *udp_capture_alloc(
     struct nbdriver_udp_capture *capture;
     struct mm_struct *mm;
     struct pid *pid;
-    const struct cred *cred;
     unsigned int i, cpu, used;
     long ret = -ENOMEM;
 
@@ -232,9 +231,9 @@ static struct nbdriver_udp_capture *udp_capture_alloc(
     mmgrab(mm);
     capture->mm = mm;
     mmput(mm);
-    cred = get_task_cred(capture->target);
-    capture->uid = cred->uid;
-    put_cred(cred);
+    /* task_uid() copies the UID under RCU. No credential pointer escapes,
+     * so no get_task_cred()/__put_cred() module exports are needed. */
+    capture->uid = task_uid(capture->target);
     capture->min_payload = request->min_payload ? request->min_payload : 16;
     capture->max_payload = request->max_payload ? request->max_payload : NBDRIVER_UDP_MAX_PAYLOAD;
     capture->pool = kvcalloc(NBDRIVER_UDP_RING_SIZE + NBDRIVER_UDP_READ_MAX +

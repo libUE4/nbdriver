@@ -18,6 +18,7 @@ SYMBOLS = [
     "dcache_clean_inval_poc", "__flush_dcache_area", "init_mm",
     "__arm64_sys_reboot", "__se_sys_reboot", "__arch_copy_to_user",
     "mm_access", "fixup_user_fault", "zero_pfn", "copy_to_user_page",
+    "init_user_ns", "get_task_cred", "__put_cred", "task_uid",
 ]
 SOURCE_PATHS = [
     "Makefile", "kernel/kallsyms.c", "kernel/task_work.c", "kernel/kprobes.c",
@@ -26,6 +27,8 @@ SOURCE_PATHS = [
     "arch/arm64/kernel/sys.c", "arch/arm64/kernel/syscall.c",
     "arch/arm64/include/asm/syscall_wrapper.h", "arch/arm64/include/asm/cacheflush.h",
     "include/linux/task_work.h", "android/abi_gki_aarch64_generic",
+    "include/linux/cred.h", "include/linux/user_namespace.h",
+    "kernel/cred.c", "kernel/user.c", "kernel/user_namespace.c",
     "android/abi_gki_aarch64_qcom",
 ]
 CONFIGS = [
