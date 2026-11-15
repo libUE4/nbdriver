@@ -26,7 +26,10 @@ static inline int nbdriver_bootstrap_try(unsigned int number, int *observed_erro
                   0, &fd, 0UL, 0UL);
     error = errno;
     if (fd == NBDRIVER_INSTALL_PENDING) {
-        if (error && error != EINVAL && error != ENOSYS &&
+        /* EBADF/EFAULT/EINVAL from real, unmodified syscall slots are
+         * expected misses, not evidence that the driver's FD is broken. */
+        if ((error == EPERM || error == EACCES || error == ENOMEM ||
+             error == EMFILE || error == ENFILE || error == EAGAIN) &&
             (!*observed_error || error == EPERM || error == EACCES))
             *observed_error = error;
         return -2;

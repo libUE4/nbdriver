@@ -120,6 +120,11 @@ int main(void)
     installed_fd=17;selected_nr=18;
     installed_fd = NBDRIVER_INSTALL_PENDING;
     bootstrap_calls=0;assert(nbdriver_open() == -1 && errno == ENODEV);
+    for (unsigned int i=0;i<3;++i) {
+        const int misses[]={EBADF,EFAULT,ENOENT};bootstrap_errno=misses[i];
+        bootstrap_calls=0;assert(nbdriver_open()==-1&&errno==ENODEV);
+        assert(bootstrap_calls==NBDRIVER_INSTALL_CANDIDATE_COUNT+1);
+    }
     bootstrap_errno = EPERM;
     bootstrap_calls=0;assert(nbdriver_open() == -1 && errno == EPERM);
     bootstrap_errno = EINVAL;
