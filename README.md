@@ -1,55 +1,74 @@
 # nbdriver
 
-面向 ARM64 Android 内核的驱动重写工程。
+面向 ARM64 Android 内核的匿名 FD / ioctl 驱动。本文按 2026-11-16 工作区源码核对；
+ABI 为 **5**，模块元数据 `MODULE_VERSION` 仍为 `0.1.0`，两者含义不同。
 
-当前通信为匿名 FD + ioctl：reboot kprobe 只排入 task_work，FD 安装在任务上下文完成。源码实现包含统一 ABI、运行状态握手和原生刷入器；用户态复制 `sdk/include/nbdriver.h` 即可接入。
+连接有两条独立路径：动态选择系统调用表中的未实现槽位，以及 reboot kprobe 后备入口。
+两条路径都通过 task_work 在调用线程上下文安装匿名 FD；拿到 FD 后使用 ioctl，UDP 采集另支持 poll。
+18 只是首选候选号，不保证最终安装在 18，也不是固定 syscall 18 kprobe。没有 `/dev/nbdriver` 节点。
 
-2026-11-14 已修复审查列出的模块引用尾部竞态、全局 CFI 补丁、GPU 查询上下文、写权限、PID 重用/命名空间、argv[0] 部分读取、线程采样和诊断问题。具体实现、验证哈希与实机/其他 KMI 的状态见 [当前修复记录](docs/audit-fixes-20261114.md)；历史发现保存在 [审查报告](docs/driver-code-review-20261114.md)。
+当前源码包括进程/SO/线程查询、读写与 READV、maps/VMA/页表映射、FD/KGSL 元数据、
+可撤销的进程/GPU 可见性过滤、随机字节、自动 devpts 绑定、运行状态与控制、SF 线程权限组和 UDP 下行采集。
+功能是否可用以 `GET_ABI.features`、具体请求结果与目标设备证据为准；ABI 相同不等于能力相同。
 
-功能包括进程/SO/线程查询、普通读写与批量读、maps/地址映射、FD 大小、KGSL GPU 元数据、随机字节和双包自动 devpts 过滤。各能力受目标后端和权限约束，详见 [SDK 说明](sdk/README.md)。
+## 阅读入口
 
-终端过滤随模块加载自动启动，匹配 `com.tencent.tmgp.dfm` 和 `com.tencent.rmcn`，支持同时运行与重启重新绑定；SDK 仅保留只读状态查询。[本轮实现与实测](docs/devpts-auto-20261114.md)。
+- [文档索引](docs/README.md)：当前接入说明与历史证据的分类。
+- [当前实现与完整 ABI 清单](docs/current-state.md)：27 个命令、能力位、权限和边界。
+- [SDK 接入](sdk/README.md)：单头与编译型 SDK、返回值和使用示例。
+- [通信机制](docs/communication.md)、[运行与卸载生命周期](docs/runtime-lifecycle.md)。
+- [构建/测试说明](docs/testing.md)、[内核兼容策略](docs/kernel-compatibility.md)、[原生加载器](docs/kernel-compatibility-loader.md)。
+
+## 源码结构
 
 ```text
 nbdriver/
-├── include/nbdriver_abi.h       # 公共 ABI、命令和结构
-├── sdk/include/nbdriver.h       # 独立 C/C++ 单头 SDK
+├── sdk/include/nbdriver_abi.h   # 内核与用户态共用协议基准
+├── sdk/include/nbdriver.h       # 独立 C/C++ 单头：镜像协议 + inline 包装
+├── sdk/include/nbdriver/client.h # 编译型 SDK 声明，接口是单头的子集
+├── sdk/src/client.c             # 编译型 SDK 实现，需链接并包含共享 ABI
 ├── src/
-│   ├── nbdriver_core.c          # 生命周期、通信、读写、查询、页表
-│   ├── nbdriver_features.c      # maps、mapping、FD/GPU/random、devpts
-│   ├── nbdriver_runtime.c       # ready/resident/handle/token 状态
-│   ├── nbdriver_platform.c      # ksym、CFI、入口、日志
-│   ├── *.h                      # 私有实现声明（统一 include 根）
-│   └── Makefile                 # 三个 Kbuild 对象
-├── tools/nbdriver_loader.c      # 原生兼容预检与 finit_module 刷入器
-├── tests/                       # 主机、SDK、设备测试
-├── docs/                        # 迁移、兼容和验证记录
-└── out/                         # 本地产物和恢复记录
+│   ├── nbdriver_core.c          # 初始化、匿名 FD/ioctl、读写、查询、页表
+│   ├── nbdriver_features.c      # maps/FD/KGSL/random、devpts、proc 过滤
+│   ├── nbdriver_runtime.c       # ready/resident、handle/token、QUIESCE/RESUME
+│   ├── nbdriver_platform.c      # 双入口、task_work、ksym、CFI、日志
+│   ├── nbdriver_sf_groups.c     # SF 调用线程的固定补充组请求
+│   ├── nbdriver_udp.c           # FD 所有权、IPv4 UDP 下行队列与 poll
+│   └── Makefile                # 上述六个 Kbuild 对象
+├── tools/                      # 加载器、导入符号/回调尾调用审计
+├── tests/nbdriver_smoke.c       # 保留的综合设备测试源码
+└── docs/                       # 当前说明、历史记录、绑定版本的验证数据
 ```
+
+分段 `BEGIN/END src/...` 标记是前三个合并文件的历史来源边界，不是磁盘上的现有子目录。
+完整职责见[文件组织](docs/structure.md)。
 
 ## 构建
 
-需要与目标设备匹配、完成准备的 ARM64 内核构建目录及 LLVM 工具链：
+在 `nbdriver/` 内，用与目标设备匹配且完成准备的 ARM64 内核构建目录执行：
 
 ```sh
 ./build.sh build KDIR=/path/to/kernel/build
-./build.sh clean KDIR=/path/to/kernel/build
+make loader SMOKE_CC=cc
 ```
 
-默认参数为 `ARCH=arm64 LLVM=1 LLVM_IAS=1`，可通过 make 参数覆盖。构建成功后模块保存到 `out/nbdriver.ko`。
+默认 `ARCH=arm64 LLVM=1 LLVM_IAS=1`，支持 make 参数覆盖。模块复制到 `out/nbdriver.ko`；
+原生加载器默认输出 `out/nbdriver-loader`。`loader` 使用指定编译器的默认目标，不自动交叉编译为 Android。
+`smoke` 才内置 Android ARM64 工具链参数；工具链位置、交叉编译和校验命令见[测试说明](docs/testing.md)。
 
-构建原生刷入器：
+`./build.sh clean KDIR=...` 会清理 Kbuild 输出并删除 `out/nbdriver.ko`，需要时显式执行。
 
-```sh
-make -C nbdriver loader
-```
+## 加载与退出边界
 
-刷入器会检查 root、内核版本前缀、必需 kallsyms 名称和 ko SHA256，随后调用 `finit_module`，再通过匿名 FD 查询 ABI 与 runtime ready 状态；失败不会伪造加载成功。具体日志格式见 [兼容刷入链路](docs/kernel-compatibility-loader.md)。
+原生加载器做 root、可选内核版本前缀、必需符号名称、原件 SHA256、私有副本及 finit_module 检查，
+最后执行 ABI/runtime 握手。它不下载模块、不自动选择内核分支、不提供服务器上报或透明热切换。
+上层 NBG 应用的下载、授权、菜单和退出命令不属于本驱动 SDK。
 
-通信接口为匿名 FD + ioctl；共享 ABI 定义在 `include/nbdriver_abi.h`。入口比较见 [通信方式比较](docs/communication-comparison.md)，兼容策略见 `docs/kernel-compatibility.md`。
+关闭辅助程序或最后一个连接 FD，不等于卸载驱动。表入口持有模块引用时，需先完成 QUIESCE，
+再关闭全部 FD 并正常卸载；失败不应强制卸载。RESUME 不恢复旧 UDP 会话。
+详细顺序、保留资源和失败检查见[生命周期](docs/runtime-lifecycle.md)。
 
-CI 配置覆盖八个代表性 Android KMI；当前版本的实际运行范围以修复记录和对应工件哈希为准。历史矩阵记录见 [远程构建](docs/remote-build.md)，历史设备测试见 [元数据记录](docs/maps-metadata-20261113.md)，不将它们当作当前版本的全矩阵运行证明。
+CI 配置列出八个 KMI 目标，历史远程记录是六目标构建。它们都不能证明当前源码已在全部目标实机运行。
+本次文档更新不刷入设备、不改变运行代码；测试结果及未覆盖范围见[测试说明](docs/testing.md)。
 
-用户态可直接复制 `sdk/include/nbdriver.h` 接入，采用 LinyuKernel 风格的独立 C/C++ 单头接口。新查询和批量读接口、限制及调用示例见 [SDK 说明](sdk/README.md)。
-
-新建源码采用 GPL-2.0-only；后续迁移其他来源代码时，应保留并核对原有许可与版权信息。
+新建源码采用 GPL-2.0-only；保留原有来源、版权及许可标记。

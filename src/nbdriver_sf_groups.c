@@ -1,4 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * 仅处理当前调用线程的固定 input/inet 补充组请求，保留已有组。
+ * 校验初始用户命名空间、四个 system UID、组长 comm 和真实 SF 可执行路径。
+ * 这里的真实 SF 校验不同于 nbdriver_sf_read_caller() 的 euid 读取门禁。
+ * 不修改整个宿主 UID/SELinux，也不替已有线程批量更新凭据。
+ * group_info 的分配引用与安装后的凭据引用分别持有、分别释放。
+ */
 #include <linux/cred.h>
 #include <linux/atomic.h>
 #include <linux/build_bug.h>

@@ -1,5 +1,12 @@
 /* ===== BEGIN src/platform/nbdriver_entry.c ===== */
 // SPDX-License-Identifier: GPL-2.0-only
+/*
+ * 当前连接：SDK 同序候选中的 NI 空槽 + 独立 reboot kprobe 后备。
+ * 18 是候选首项，不是固定安装号；两条路径均通过 task_work 安装匿名 FD。
+ * 表入口、排队 work、已打开 FD 各自持有引用，不能用关闭一个 FD 替代卸载协议。
+ * 表入口需 QUIESCE 恢复并同步后释放引用；失败保留引用，禁止强行释放活跃代码。
+ * 动态符号与局部 CFI 调用依赖精确目标内核；不改全局 CFI slowpath。
+ */
 #include <linux/cred.h>
 #include <linux/errno.h>
 #include <linux/kprobes.h>

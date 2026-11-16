@@ -4,10 +4,16 @@
 
 #include "nbdriver_abi.h"
 
+/* 编译型 SDK：依赖同目录公共 ABI 并链接 sdk/src/client.c。
+ * 接口是独立单头的子集；关闭用 close(fd)，不表示模块卸载。
+ * open 只验证 ABI；调用方另查 feature 与按需查 runtime READY。 */
 int nbdriver_open(void);
 int nbdriver_get_abi(int fd, struct nbdriver_abi_info *info);
 int nbdriver_get_runtime_status(int fd, struct nbdriver_runtime_status *status);
 int nbdriver_runtime_control(int fd, struct nbdriver_runtime_control *control);
+/* 清零请求并填写 SF_GROUPS_ABI_VERSION 后调用；返回 0 或 -1/errno。 */
+int nbdriver_acquire_surfaceflinger_groups(
+	int fd, struct nbdriver_sf_groups_request *request);
 /* Root-only loader primitive; policy/preflight belongs to the caller. */
 int nbdriver_load_module_path(const char *path, const char *parameters);
 /* On an operational error, request still reports copied/error/failed_address. */

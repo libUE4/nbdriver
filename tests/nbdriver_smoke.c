@@ -1,3 +1,7 @@
+/* 综合设备测试：构造自己的进程、线程与缓冲区，包含实际读写及失败回收检查。
+ * 运行需要原生 Android ARM64、匹配驱动与对应权限；不是纯查询/只读探针。
+ * 普通 Linux 主机只做构建检查，不直接执行真实 Android bootstrap。
+ */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif

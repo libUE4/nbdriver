@@ -1,4 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/*
+ * 原始 IPv4 UDP 下行观察，不进行坐标解密，不修改目标 socket 收包内容。
+ * 同时只有一个 struct file 所有者；dup 共享所有权，最终 release 停止采集。
+ * UID 筛选可包含同 UID 的其他进程，generation + sequence 标记会话与记录。
+ * 回调只交换预分配记录；用户拷贝在环形队列自旋锁外，失败保留分离记录供重试。
+ * QUIESCE 清空会话；RESUME 后由用户显式重新 START。
+ */
 /* Downlink capture adapted from workspace enkernel/udp_capture.c. Retains
  * UID filtering, per-CPU scratch ownership exchange, and bounded batches.
  * Adds nbdriver identity checks, FD ownership, retryable reads and poll. */

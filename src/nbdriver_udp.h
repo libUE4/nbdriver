@@ -5,6 +5,8 @@
 #include <linux/poll.h>
 #include <linux/types.h>
 
+/* owner 是 struct file，dup 后共享；release 只在最后一个 file 引用关闭时触发。
+ * poll 应使用有限超时，定期检查目标退出/exec；可读不保证下一次 READ 一定成功。 */
 struct file;
 void nbdriver_udp_init(void);
 void nbdriver_udp_exit(void);

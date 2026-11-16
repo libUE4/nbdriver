@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 检查最终 ELF 的实际 ARM64 回调指令及 relocation；源码形状或编译成功不能代替此检查。
 """Fail if FD task_work can return to module text after its last module_put.
 
 Inspect the actual AArch64 module, including LTO builds; source spelling or a

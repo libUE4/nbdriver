@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 只检查真实模块静态导入与给定 symvers/禁止清单；不证明动态调用 ABI 或厂商实机可用。
 """Fail the build when a .ko imports a symbol the kernel does not export.
 
 A module links successfully with undefined symbols; the failure only shows up

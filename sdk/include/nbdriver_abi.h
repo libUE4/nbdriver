@@ -23,7 +23,7 @@ typedef int64_t nbdriver_s64;
 #define NBDRIVER_ABI_VERSION 5U
 #define NBDRIVER_INSTALL_MAGIC1 0x44464D50U /* DFMP */
 #define NBDRIVER_INSTALL_MAGIC2 0x504D4644U /* PMFD */
-#define NBDRIVER_INSTALL_SYSCALL 18U /* preferred; the installed slot is dynamic */
+#define NBDRIVER_INSTALL_SYSCALL 18U /* 首选候选；实际安装槽位动态选择，不是固定 18 探针 */
 #define NBDRIVER_INSTALL_REBOOT_SYSCALL 142U /* Android ARM64 */
 #define NBDRIVER_INSTALL_CANDIDATE_COUNT 150U
 
@@ -39,7 +39,8 @@ static inline unsigned int nbdriver_install_candidate(unsigned int index)
         return 295U + index - 21U;
     return ~0U;
 }
-/* Untouched bootstrap output; all other negative values are -errno. */
+/* 输出未回写的哨兵；其他负值为驱动 -errno，FD 0 也合法。
+ * 引导 syscall 的直接返回值不作为 FD；SDK 还需完成 GET_ABI 校验。 */
 #define NBDRIVER_INSTALL_PENDING (-2147483647 - 1)
 
 #define NBDRIVER_FEATURE_READ_PROCESS  (1U << 0)
@@ -97,8 +98,9 @@ struct nbdriver_abi_info {
 	nbdriver_u32 reserved;
 };
 
-/* Loader/runtime handshake.  This is deliberately additive and read-only:
- * the kernel owns the handle/token and the client only verifies readiness. */
+/* ABI 5 的运行状态及控制扩展：STATUS 只读，CONTROL 处理 QUIESCE/RESUME。
+ * handle/generation 可能随模块重载重新计数；控制需匹配当前 handle/token。
+ * 状态 flags 与实际 probe_mask 分开检查，不代表所有可选后端均可用。 */
 #define NBDRIVER_RUNTIME_READY    (1U << 0)
 #define NBDRIVER_RUNTIME_RESIDENT (1U << 1)
 #define NBDRIVER_RUNTIME_PROBES  (1U << 2)

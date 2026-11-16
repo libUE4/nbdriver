@@ -1,4 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * 状态与同模块控制；generation/handle 不是跨重载的全局唯一标识。
+ * STATUS 返回当前 token；CONTROL 核对版本、大小、handle/token 后执行操作。
+ * QUIESCE 恢复表入口、阻止普通业务并停止 UDP，不关闭其他客户端 FD。
+ * RESUME 不重建旧 UDP 会话，不提供新旧模块间无中断 hand-off。
+ * 状态/业务可能已经改变而回执 usercopy 失败，调用方需重新查询状态。
+ */
 #include <linux/atomic.h>
 #include <linux/errno.h>
 #include <linux/mutex.h>

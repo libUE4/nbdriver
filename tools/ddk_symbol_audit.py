@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 仅采集 DDK 导出、配置、源码和工件证据；不改内核，不据此承诺厂商兼容。
 """Record actual DDK export, config and source evidence without patching a kernel."""
 import argparse
 import datetime

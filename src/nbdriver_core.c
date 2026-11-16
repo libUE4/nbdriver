@@ -1,5 +1,13 @@
 /* ===== BEGIN src/core/nbdriver_main.c ===== */
 // SPDX-License-Identifier: GPL-2.0-only
+/*
+ * 当前职责：模块生命周期、匿名 FD/ioctl、读写/READV、进程/线程和页表。
+ * 公共协议位于 sdk/include/nbdriver_abi.h；其他五个编译单元见 src/Makefile。
+ * 初始化先准备各后端，最后发布连接入口；失败按已完成阶段回收。
+ * UDP 是可选后端；feature 不可用不等于整个驱动初始化失败。
+ * GET_ABI 仅报告能力，具体请求仍可失败；QUIESCE 的业务拦截在统一分发处。
+ * 修改读取门禁时区分 root/system 读取路径、普通 ptrace 路径及写入权限。
+ */
 #include <linux/errno.h>
 #include <linux/cred.h>
 #include <linux/init.h>

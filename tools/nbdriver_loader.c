@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Small native loader for an authorized nbdriver build.  It deliberately
- * performs selection, digest verification and a post-load ABI handshake; it
- * does not patch syscall tables or bypass module-signature enforcement.
+ * 原生加载器：使用调用方选定的本地模块，校验原件 SHA256、私有副本与 ABI/runtime。
+ * 不下载、不自动选择 KMI、不上报服务器，也不提供卸载或无中断模块切换。
+ * --release-prefix 为可选字符串预检，--kallsyms 用于显式符号改写，不替换预检路径。
+ * 本工具不改系统调用表、不绕过模块签名；内核连接入口由模块自身管理。
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -14,11 +15,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 
 #include "../sdk/include/nbdriver.h"
+#include "nbdriver_patch.h"
 
 struct sha256_ctx {
 	uint32_t h[8];
@@ -75,20 +78,159 @@ static void sha256_final(struct sha256_ctx *c, uint8_t out[32])
 	for (i=0;i<8;++i) put_be32(out+i*4,c->h[i]);
 }
 
-static int hash_file(const char *path, uint8_t digest[32])
-{
-	struct sha256_ctx c; uint8_t buf[64*1024]; ssize_t n; int fd=open(path,O_RDONLY|O_CLOEXEC);
-	if (fd < 0)
-		return -errno;
-	sha256_init(&c);
-	for (;;) { n=read(fd,buf,sizeof(buf)); if (n==0) break; if (n<0) { int e=errno; close(fd); return -e; } sha256_update(&c,buf,(size_t)n); }
-	close(fd); sha256_final(&c,digest); return 0;
-}
-
 static void hex_digest(const uint8_t d[32], char out[65])
 {
 	static const char x[]="0123456789abcdef"; unsigned int i;
 	for (i=0;i<32;++i) { out[i*2]=x[d[i]>>4]; out[i*2+1]=x[d[i]&15U]; } out[64]='\0';
+}
+
+struct stage_paths {
+	char dir[PATH_MAX];
+	char module[PATH_MAX];
+	char symbols[PATH_MAX];
+	char vermagic[PATH_MAX];
+};
+
+static struct stage_paths staged;
+static int stage_cleanup_registered;
+
+static void cleanup_staged_files(void)
+{
+	if (staged.symbols[0])
+		unlink(staged.symbols);
+	if (staged.vermagic[0])
+		unlink(staged.vermagic);
+	if (staged.module[0])
+		unlink(staged.module);
+	if (staged.dir[0])
+		rmdir(staged.dir);
+	memset(&staged, 0, sizeof(staged));
+}
+
+static int write_all(int fd, const unsigned char *buf, size_t size)
+{
+	size_t done = 0;
+
+	while (done < size) {
+		ssize_t n = write(fd, buf + done, size - done);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			return -errno;
+		}
+		if (n == 0)
+			return -EIO;
+		done += (size_t)n;
+	}
+	return 0;
+}
+
+static int stage_verified_module(const char *source, const char *expected,
+				 const char *temp_parent, char *digest_text,
+				 size_t digest_text_size)
+{
+	char template[PATH_MAX], got[65];
+	struct sha256_ctx hash;
+	struct stat st;
+	off_t source_size;
+	uint64_t copied = 0;
+	uint8_t digest[32];
+	unsigned char buf[64 * 1024];
+	int in_fd = -1, out_fd = -1, rc = 0;
+
+	memset(&staged, 0, sizeof(staged));
+	if (snprintf(template, sizeof(template), "%s/nbdriver-loader.XXXXXX",
+		     temp_parent) >= (int)sizeof(template))
+		return -ENAMETOOLONG;
+	if (!mkdtemp(template))
+		return -errno;
+	strncpy(staged.dir, template, sizeof(staged.dir) - 1);
+	if (!stage_cleanup_registered) {
+		if (atexit(cleanup_staged_files) != 0) {
+			rmdir(staged.dir);
+			memset(&staged, 0, sizeof(staged));
+			return -ENOMEM;
+		}
+		stage_cleanup_registered = 1;
+	}
+	if (snprintf(staged.module, sizeof(staged.module), "%s/module.ko",
+		     staged.dir) >= (int)sizeof(staged.module)) {
+		rc = -ENAMETOOLONG;
+		goto fail;
+	}
+	in_fd = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+	if (in_fd < 0) {
+		rc = -errno;
+		goto fail;
+	}
+	if (fstat(in_fd, &st) < 0) {
+		rc = -errno;
+		goto fail;
+	}
+	if (!S_ISREG(st.st_mode) || st.st_size <= 0) {
+		rc = -EINVAL;
+		goto fail;
+	}
+	source_size = st.st_size;
+	out_fd = open(staged.module,
+		      O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+	if (out_fd < 0) {
+		rc = -errno;
+		goto fail;
+	}
+	sha256_init(&hash);
+	for (;;) {
+		ssize_t n = read(in_fd, buf, sizeof(buf));
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n < 0) {
+			rc = -errno;
+			goto fail;
+		}
+		if (n == 0)
+			break;
+		sha256_update(&hash, buf, (size_t)n);
+		copied += (uint64_t)n;
+		rc = write_all(out_fd, buf, (size_t)n);
+		if (rc < 0)
+			goto fail;
+	}
+	if (fstat(in_fd, &st) < 0) {
+		rc = -errno;
+		goto fail;
+	}
+	if (st.st_size != source_size || copied != (uint64_t)source_size) {
+		rc = -EINVAL;
+		goto fail;
+	}
+	sha256_final(&hash, digest);
+	hex_digest(digest, got);
+	if (strcasecmp(got, expected)) {
+		rc = -EBADMSG;
+		goto fail;
+	}
+	if (fchmod(out_fd, 0600) < 0) {
+		rc = -errno;
+		goto fail;
+	}
+	if (close(out_fd) < 0) {
+		out_fd = -1;
+		rc = -errno;
+		goto fail;
+	}
+	out_fd = -1;
+	close(in_fd);
+	if (digest_text && digest_text_size)
+		snprintf(digest_text, digest_text_size, "%s", got);
+	return 0;
+
+fail:
+	if (out_fd >= 0)
+		close(out_fd);
+	if (in_fd >= 0)
+		close(in_fd);
+	cleanup_staged_files();
+	return rc;
 }
 
 static int valid_hex64(const char *s)
@@ -125,32 +267,347 @@ static int read_kptr_restrict(void)
 
 static void usage(const char *name)
 {
-	fprintf(stderr,"usage: %s --module PATH --sha256 HEX [--release-prefix PREFIX]\n",name);
+	fprintf(stderr,"usage: %s --module PATH --sha256 HEX [--release-prefix PREFIX]"
+		" [--patch-symbols --patch-symbol NAME ...] [--kallsyms PATH]"
+		" [--vermagic-retry]\n",name);
+}
+
+static int valid_symbol_name(const char *name)
+{
+	const unsigned char *p = (const unsigned char *)name;
+
+	if (!name || !*name || strlen(name) > 255)
+		return 0;
+	for (; *p; ++p)
+		if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+		       (*p >= '0' && *p <= '9') || *p == '_' || *p == '.' ||
+		       *p == '$'))
+			return 0;
+	return 1;
+}
+
+/*
+ * Read kernel log text produced by this load attempt and decide whether the
+ * failure was specifically a vermagic rejection. Anything else must not
+ * trigger a rewrite: the point of the retry is to be targeted.
+ */
+static int log_shows_vermagic_mismatch(const char *text)
+{
+	const char *line = text;
+
+	while (line && *line) {
+		const char *end = strchr(line, '\n');
+		const char *module = strstr(line, "nbdriver:");
+		size_t len = end ? (size_t)(end - line) : strlen(line);
+
+		if (module && (size_t)(module - line) < len) {
+			if ((memmem(module, len - (size_t)(module - line), "Unknown symbol",
+				    sizeof("Unknown symbol") - 1)) ||
+			    memmem(module, len - (size_t)(module - line),
+				   "disagrees about version",
+				   sizeof("disagrees about version") - 1)) {
+				line = end ? end + 1 : NULL;
+				continue;
+			}
+			if (memmem(module, len - (size_t)(module - line), "version magic",
+				   sizeof("version magic") - 1) &&
+			    (memmem(module, len - (size_t)(module - line), "should be",
+				    sizeof("should be") - 1) ||
+			     memmem(module, len - (size_t)(module - line), "disagrees",
+				    sizeof("disagrees") - 1)))
+				return 1;
+			if (memmem(module, len - (size_t)(module - line), "vermagic",
+				   sizeof("vermagic") - 1) &&
+			    memmem(module, len - (size_t)(module - line), "mismatch",
+				   sizeof("mismatch") - 1))
+				return 1;
+		}
+		line = end ? end + 1 : NULL;
+	}
+	return 0;
+}
+
+static int open_klog_cursor(void)
+{
+	int fd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+
+	if (fd < 0)
+		return -errno;
+	if (lseek(fd, 0, SEEK_END) < 0) {
+		int e = errno;
+		close(fd);
+		return -e;
+	}
+	return fd;
+}
+
+static int collect_klog(int fd, char *out, size_t out_size)
+{
+	size_t used = 0;
+	int seen = 0;
+
+	if (!out || !out_size || fd < 0)
+		return -EINVAL;
+	out[0] = '\0';
+	for (;;) {
+		char record[4096];
+		ssize_t len = read(fd, record, sizeof(record));
+		size_t take;
+
+		if (len < 0 && errno == EINTR)
+			continue;
+		if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+			break;
+		if (len < 0)
+			return -errno;
+		if (len == 0)
+			break;
+		seen = 1;
+		take = (size_t)len;
+		if (take > out_size - used - 1)
+			take = out_size - used - 1;
+		if (take == 0)
+			break;
+		memcpy(out + used, record, take);
+		used += take;
+		out[used] = '\0';
+		if (take < (size_t)len)
+			break;
+	}
+	return seen ? 0 : -ENODATA;
+}
+
+/*
+ * Load one image via finit_module. Returns 0 on success, otherwise the
+ * negative errno reported by the syscall.
+ */
+static int load_image(const char *path)
+{
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	int rc;
+
+	if (fd < 0)
+		return -errno;
+#ifdef SYS_finit_module
+	rc = (int)syscall(SYS_finit_module, fd, "", 0);
+#else
+	rc = -1;
+	errno = ENOSYS;
+#endif
+	{
+		int saved = errno;
+		close(fd);
+		if (rc < 0)
+			return -saved;
+	}
+	return 0;
 }
 
 int main(int argc, char **argv)
 {
-	const char *module=NULL,*expected=NULL,*prefix=NULL; struct utsname u; uint8_t digest[32]; char got[65], detail[PATH_MAX+128]; int fd=-1, rc, i;
-	for(i=1;i<argc;++i) { if(!strcmp(argv[i],"--module")&&i+1<argc) module=argv[++i]; else if(!strcmp(argv[i],"--sha256")&&i+1<argc) expected=argv[++i]; else if(!strcmp(argv[i],"--release-prefix")&&i+1<argc) prefix=argv[++i]; else { usage(argv[0]); return 2; } }
-	if(!module||!valid_hex64(expected)) { usage(argv[0]); return 2; }
-	if(geteuid()!=0) { log_line("preflight.fail","reason=not_root"); return 77; }
-	if(uname(&u)<0) { log_line("preflight.fail","reason=uname"); return 1; }
-	if(prefix && strncmp(u.release,prefix,strlen(prefix))) { log_line("preflight.fail","reason=release_mismatch"); return 78; }
-	if(check_kallsyms()<0) { log_line("preflight.fail","reason=required_symbol_missing"); return 79; }
-	rc=hash_file(module,digest); if(rc<0) { snprintf(detail,sizeof(detail),"reason=hash_read error=%d",-rc); log_line("preflight.fail",detail); return 1; }
-	hex_digest(digest,got); if(strcasecmp(got,expected)) { log_line("preflight.fail","reason=sha256_mismatch"); return 80; }
-	snprintf(detail,sizeof(detail),"release=%s module=%s sha256=%s kptr_restrict=%d",u.release,module,got,read_kptr_restrict()); log_line("preflight.pass",detail);
-	fd=open(module,O_RDONLY|O_CLOEXEC); if(fd<0) { log_line("load.fail","reason=open"); return 1; }
-#ifdef SYS_finit_module
-	rc=(int)syscall(SYS_finit_module,fd,"",0);
-#else
-	rc=-1; errno=ENOSYS;
-#endif
-	close(fd); if(rc<0) { snprintf(detail,sizeof(detail),"errno=%d",errno); log_line("load.fail",detail); return 81; }
-	log_line("load.pass","module=nbdriver");
-	fd=nbdriver_open(); if(fd<0) { snprintf(detail,sizeof(detail),"errno=%d",errno); log_line("handshake.fail",detail); return 82; }
-	struct nbdriver_abi_info abi; struct nbdriver_runtime_status status;
-	if(nbdriver_get_abi(fd,&abi)<0 || nbdriver_get_runtime_status(fd,&status)<0 || abi.version!=NBDRIVER_ABI_VERSION || !(status.flags&NBDRIVER_RUNTIME_READY)) { log_line("handshake.fail","reason=abi_or_runtime_not_ready"); close(fd); return 83; }
-	snprintf(detail,sizeof(detail),"abi=%u features=0x%08x handle=%" PRIu64 " generation=%" PRIu64 " flags=0x%08x",abi.version,abi.features,status.handle,status.generation,status.flags); log_line("ready",detail);
-	close(fd); return 0;
+	const char *module = NULL, *expected = NULL, *prefix = NULL;
+	const char *kallsyms_path = "/proc/kallsyms";
+	const char *allow_symbols[64];
+	size_t allow_count = 0;
+	struct utsname u;
+	char got[65], detail[PATH_MAX + 256];
+	char work[PATH_MAX], retry[PATH_MAX], klog[8192], plog[256];
+	int patch_symbols = 0, vermagic_retry = 0;
+	int fd = -1, kmsg_fd = -1, rc, i;
+
+	for (i = 1; i < argc; ++i) {
+		if (!strcmp(argv[i], "--module") && i + 1 < argc)
+			module = argv[++i];
+		else if (!strcmp(argv[i], "--sha256") && i + 1 < argc)
+			expected = argv[++i];
+		else if (!strcmp(argv[i], "--release-prefix") && i + 1 < argc)
+			prefix = argv[++i];
+		else if (!strcmp(argv[i], "--patch-symbols"))
+			patch_symbols = 1;
+		else if (!strcmp(argv[i], "--patch-symbol") && i + 1 < argc &&
+			 valid_symbol_name(argv[i + 1])) {
+			if (allow_count == sizeof(allow_symbols) / sizeof(allow_symbols[0])) {
+				usage(argv[0]);
+				return 2;
+			}
+			allow_symbols[allow_count++] = argv[++i];
+		} else if (!strcmp(argv[i], "--kallsyms") && i + 1 < argc)
+			kallsyms_path = argv[++i];
+		else if (!strcmp(argv[i], "--vermagic-retry"))
+			vermagic_retry = 1;
+		else {
+			usage(argv[0]);
+			return 2;
+		}
+	}
+	if (!module || !valid_hex64(expected) || (patch_symbols && !allow_count) ||
+	    (!patch_symbols && allow_count)) {
+		usage(argv[0]);
+		return 2;
+	}
+	if (geteuid() != 0) {
+		log_line("preflight.fail", "reason=not_root");
+		return 77;
+	}
+	if (uname(&u) < 0) {
+		log_line("preflight.fail", "reason=uname");
+		return 1;
+	}
+	if (prefix && strncmp(u.release, prefix, strlen(prefix))) {
+		log_line("preflight.fail", "reason=release_mismatch");
+		return 78;
+	}
+	if (check_kallsyms() < 0) {
+		log_line("preflight.fail", "reason=required_symbol_missing");
+		return 79;
+	}
+
+	/*
+	 * The digest always covers the artifact as shipped. Every rewrite below
+	 * writes to a separate path, so a patched image can never masquerade as
+	 * the verified original.
+	 */
+	rc = stage_verified_module(module, expected, "/data/local/tmp", got,
+				   sizeof(got));
+	if (rc < 0) {
+		if (rc == -EBADMSG) {
+			log_line("preflight.fail", "reason=sha256_mismatch");
+			return 80;
+		}
+		snprintf(detail, sizeof(detail), "reason=verified_stage_failed error=%d",
+			 -rc);
+		log_line("preflight.fail", detail);
+		return 1;
+	}
+	snprintf(detail, sizeof(detail),
+		 "release=%s module=%s sha256=%s kptr_restrict=%d",
+		 u.release, module, got, read_kptr_restrict());
+	log_line("preflight.pass", detail);
+
+	snprintf(work, sizeof(work), "%s", staged.module);
+
+	/* Every absolute import must be individually named by the caller. */
+	if (patch_symbols) {
+		int patched = 0;
+
+		if (snprintf(staged.symbols, sizeof(staged.symbols),
+			     "%s.symabs.%ld", staged.module,
+			     (long)getpid()) >= (int)sizeof(staged.symbols)) {
+			log_line("patch.fail", "reason=staged_path_too_long");
+			return 84;
+		}
+		rc = nbdriver_patch_symbols(staged.module, staged.symbols, kallsyms_path,
+					    allow_symbols, allow_count, &patched,
+					    plog, sizeof(plog));
+		if (rc < 0) {
+			snprintf(detail, sizeof(detail),
+				 "reason=symbol_patch_failed detail=%s", plog);
+			log_line("patch.fail", detail);
+			return 84;
+		}
+		for (i = 0; (size_t)i < allow_count; ++i)
+			log_line("patch.symbol.allow", allow_symbols[i]);
+		snprintf(detail, sizeof(detail), "symbols=%d allowlist_count=%zu source=%s",
+			 patched, allow_count, kallsyms_path);
+		log_line("patch.symbols", detail);
+		snprintf(work, sizeof(work), "%s", staged.symbols);
+	} else {
+		log_line("patch.symbols", "skipped");
+	}
+
+	if (vermagic_retry) {
+		kmsg_fd = open_klog_cursor();
+		if (kmsg_fd < 0)
+			log_line("klog", "attempt_cursor=unavailable retry_disabled_on_failure=1");
+	}
+	rc = load_image(work);
+	if (rc == 0) {
+		if (kmsg_fd >= 0)
+			close(kmsg_fd);
+		kmsg_fd = -1;
+		log_line("load.pass", "module=nbdriver");
+	} else {
+		snprintf(detail, sizeof(detail), "errno=%d", -rc);
+		log_line("load.fail", detail);
+
+		/*
+		 * Step 3: retry only when this attempt's kernel log proves the
+		 * rejection was a vermagic mismatch. Rebuilding .modinfo is
+		 * pointless for any other error, so the log is the gate.
+		 */
+		if (!vermagic_retry) {
+			return 81;
+		}
+
+		if (kmsg_fd < 0 || collect_klog(kmsg_fd, klog, sizeof(klog)) < 0) {
+			if (kmsg_fd >= 0)
+				close(kmsg_fd);
+			log_line("patch.fail", "reason=klog_unavailable");
+			return 81;
+		}
+		close(kmsg_fd);
+		kmsg_fd = -1;
+		if (!log_shows_vermagic_mismatch(klog)) {
+			log_line("patch.vermagic", "skipped reason=not_vermagic");
+			return 81;
+		}
+
+		if (snprintf(staged.vermagic, sizeof(staged.vermagic),
+			     "%s.vermagic.%ld", work, (long)getpid()) >=
+		    (int)sizeof(staged.vermagic)) {
+			log_line("patch.fail", "reason=retry_path_too_long");
+			return 85;
+		}
+		snprintf(retry, sizeof(retry), "%s", staged.vermagic);
+		{
+			int changed = 0;
+
+			rc = nbdriver_patch_vermagic(work, retry, u.release,
+						     &changed, plog, sizeof(plog));
+			if (rc < 0) {
+				snprintf(detail, sizeof(detail),
+					 "reason=vermagic_patch_failed detail=%s", plog);
+				log_line("patch.fail", detail);
+				return 85;
+			}
+			snprintf(detail, sizeof(detail), "magic=%s changed=%d",
+				 u.release, changed);
+			log_line("patch.vermagic", detail);
+		}
+		rc = load_image(retry);
+		if (rc < 0) {
+			snprintf(detail, sizeof(detail), "errno=%d", -rc);
+			log_line("load.fail", detail);
+			return 81;
+		}
+		log_line("load.pass", "module=nbdriver vermagic_retry=1");
+	}
+
+	fd = nbdriver_open();
+	if (fd < 0) {
+		snprintf(detail, sizeof(detail), "errno=%d", errno);
+		log_line("handshake.fail", detail);
+		return 82;
+	}
+	{
+		struct nbdriver_abi_info abi;
+		struct nbdriver_runtime_status status;
+
+		if (nbdriver_get_abi(fd, &abi) < 0 ||
+		    nbdriver_get_runtime_status(fd, &status) < 0 ||
+		    abi.version != NBDRIVER_ABI_VERSION ||
+		    !(status.flags & NBDRIVER_RUNTIME_READY)) {
+			log_line("handshake.fail", "reason=abi_or_runtime_not_ready");
+			close(fd);
+			return 83;
+		}
+		snprintf(detail, sizeof(detail),
+			 "abi=%u features=0x%08x handle=%" PRIu64
+			 " generation=%" PRIu64 " flags=0x%08x",
+			 abi.version, abi.features, status.handle,
+			 status.generation, status.flags);
+		log_line("ready", detail);
+	}
+	close(fd);
+	return 0;
 }

@@ -11,8 +11,9 @@
 
 #include "nbdriver/client.h"
 
-/* -2 means this syscall did not recognize the bootstrap; -1 is an
- * authoritative driver/ABI error. Only a validated anonymous FD is success. */
+/* 编译型 SDK 的连接语义与单头一致：-2 为候选 miss，-1 为确定错误。
+ * GET_ABI 通过才返回 FD（包括 0），READY 和可选 feature 由调用方另查。
+ * 本文件仅实现 client.h 中声明的接口；其余单头便利函数不自动成为导出函数。 */
 static inline int nbdriver_bootstrap_try(unsigned int number, int *observed_error)
 {
     struct nbdriver_abi_info info;
@@ -98,6 +99,17 @@ int nbdriver_runtime_control(int fd, struct nbdriver_runtime_control *control)
 		return -1;
 	}
 	return ioctl(fd, NBDRIVER_IOC_RUNTIME_CONTROL, control);
+}
+
+/* 与单头及 NBG-Draw 同名入口保持一致，不隐式重置调用方请求。 */
+int nbdriver_acquire_surfaceflinger_groups(
+	int fd, struct nbdriver_sf_groups_request *request)
+{
+	if (fd < 0 || !request) {
+		errno = EINVAL;
+		return -1;
+	}
+	return ioctl(fd, NBDRIVER_IOC_SF_GROUPS_ACQUIRE, request);
 }
 
 int nbdriver_load_module_path(const char *path, const char *parameters)

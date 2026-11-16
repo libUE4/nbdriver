@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* nbdriver 用户态单头接口：复制本文件即可使用，支持 C/C++。
  * 协议、命令号和调用实现全部在本文件中；不需要额外的 .c/.cpp。
- * 用法：open -> get_abi -> read/write_process_memory -> close。
+ * 用法：open -> get_abi/按需查 runtime -> 检查 feature -> 请求 -> close。
+ * open 仅验证 ABI，不保证 READY 或每项能力可用；关闭 FD 不卸载驱动。
+ * SF_GROUPS 与共享 ABI 及 NBG-Draw 已有调用一致，使用前检查能力位。
  */
 #ifndef NBDRIVER_SINGLE_HEADER_H
 #define NBDRIVER_SINGLE_HEADER_H
@@ -18,7 +20,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-/* 与内核 include/nbdriver_abi.h 保持一致。 */
+/* 与同目录 nbdriver_abi.h 中的内核协议保持一致。 */
 #ifndef NBDRIVER_ABI_H
 #define NBDRIVER_ABI_H
 
@@ -31,7 +33,7 @@ typedef int64_t nbdriver_s64;
 #define NBDRIVER_ABI_VERSION 5U
 #define NBDRIVER_INSTALL_MAGIC1 0x44464D50U /* DFMP */
 #define NBDRIVER_INSTALL_MAGIC2 0x504D4644U /* PMFD */
-#define NBDRIVER_INSTALL_SYSCALL 18U /* preferred; the installed slot is dynamic */
+#define NBDRIVER_INSTALL_SYSCALL 18U /* 首选候选；实际安装槽位动态选择，不是固定 18 探针 */
 #define NBDRIVER_INSTALL_REBOOT_SYSCALL 142U /* Android ARM64 */
 #define NBDRIVER_INSTALL_CANDIDATE_COUNT 150U
 
@@ -47,7 +49,8 @@ static inline unsigned int nbdriver_install_candidate(unsigned int index)
         return 295U + index - 21U;
     return ~0U;
 }
-/* Untouched bootstrap output; all other negative values are -errno. */
+/* 输出未回写的哨兵；其他负值为驱动 -errno，FD 0 也合法。
+ * 引导 syscall 的直接返回值不作为 FD；SDK 还需完成 GET_ABI 校验。 */
 #define NBDRIVER_INSTALL_PENDING (-2147483647 - 1)
 
 #define NBDRIVER_FEATURE_READ_PROCESS  (1U << 0)
@@ -72,6 +75,7 @@ static inline unsigned int nbdriver_install_candidate(unsigned int index)
 #define NBDRIVER_FEATURE_GPU_VISIBILITY (1U << 19)
 #define NBDRIVER_FEATURE_PROC_VISIBILITY (1U << 20)
 #define NBDRIVER_FEATURE_RUNTIME_STATUS (1U << 21)
+#define NBDRIVER_FEATURE_SF_GROUPS      (1U << 22)
 #define NBDRIVER_READ_MAX (64U * 1024U)
 #define NBDRIVER_WRITE_MAX (64U * 1024U)
 
@@ -104,6 +108,9 @@ struct nbdriver_abi_info {
 	nbdriver_u32 reserved;
 };
 
+/* ABI 5 的运行状态及控制扩展：STATUS 只读，CONTROL 处理 QUIESCE/RESUME。
+ * handle/generation 可能随模块重载重新计数；控制需匹配当前 handle/token。
+ * 状态 flags 与实际 probe_mask 分开检查，不代表所有可选后端均可用。 */
 #define NBDRIVER_RUNTIME_READY    (1U << 0)
 #define NBDRIVER_RUNTIME_RESIDENT (1U << 1)
 #define NBDRIVER_RUNTIME_PROBES  (1U << 2)
@@ -148,6 +155,24 @@ struct nbdriver_runtime_control {
 	_IOR(NBDRIVER_IOC_MAGIC, 0x22, struct nbdriver_runtime_status)
 #define NBDRIVER_IOC_RUNTIME_CONTROL \
 	_IOWR(NBDRIVER_IOC_MAGIC, 0x23, struct nbdriver_runtime_control)
+
+/* 只请求当前调用线程的固定补充组；内核继续校验真实 SF 身份。 */
+#define NBDRIVER_SF_GROUPS_ABI_VERSION 1U
+#define NBDRIVER_SF_GROUP_INPUT        (1U << 0)
+#define NBDRIVER_SF_GROUP_INET         (1U << 1)
+#define NBDRIVER_SF_GROUP_REQUIRED     (NBDRIVER_SF_GROUP_INPUT | NBDRIVER_SF_GROUP_INET)
+
+struct nbdriver_sf_groups_request {
+	nbdriver_u32 abi_version;
+	nbdriver_u32 reserved;
+	nbdriver_u32 out_present;
+	nbdriver_u32 out_added;
+	nbdriver_u32 out_group_count;
+	nbdriver_u32 out_reserved[3];
+};
+
+#define NBDRIVER_IOC_SF_GROUPS_ACQUIRE \
+	_IOWR(NBDRIVER_IOC_MAGIC, 0x24, struct nbdriver_sf_groups_request)
 
 
 /* Additive ABI 5 extensions; existing request layouts and ioctl numbers stay fixed. */
@@ -503,8 +528,9 @@ extern "C" {
 extern long int syscall(long int number, ...) __THROW;
 #endif
 
-/* -2 means this syscall did not recognize the bootstrap; -1 is an
- * authoritative driver/ABI error. Only a validated anonymous FD is success. */
+/* 内部结果：-2 是候选 miss，-1 是确定的驱动/ABI 错误，>=0 是已校验 FD。
+ * 扫描完成后才把未识别候选的可见权限/资源错误映射为最终 errno。
+ * 原生 Android ARM64 引导序列，主机测试应 mock syscall，不能直接运行。 */
 static inline int nbdriver_bootstrap_try(unsigned int number, int *observed_error)
 {
     struct nbdriver_abi_info info;
@@ -603,6 +629,18 @@ static inline int nbdriver_runtime_control(
 		return -1;
 	}
 	return ioctl(fd, NBDRIVER_IOC_RUNTIME_CONTROL, control);
+}
+
+/* 调用方先清零 request 并填写 abi_version；保留内核回执与 errno。
+ * 仅 FD/指针参数在此校验，身份、版本及补充组权限由现有内核接口检查。 */
+static inline int nbdriver_acquire_surfaceflinger_groups(
+	int fd, struct nbdriver_sf_groups_request *request)
+{
+	if (fd < 0 || !request) {
+		errno = EINVAL;
+		return -1;
+	}
+	return ioctl(fd, NBDRIVER_IOC_SF_GROUPS_ACQUIRE, request);
 }
 
 static inline int nbdriver_read_process(int fd, struct nbdriver_read_request *request)

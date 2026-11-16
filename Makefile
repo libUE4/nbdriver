@@ -1,3 +1,5 @@
+# 构建入口：all 输出 out/nbdriver.ko；loader 按 SMOKE_CC 的默认目标编译。
+# 仅 smoke 内置 Android ARM64 交叉参数；公共协议统一在 sdk/include/。
 .DEFAULT_GOAL := all
 
 PROJECT_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
@@ -33,7 +35,7 @@ smoke:
 		-resource-dir="$(TUSI_PREBUILT)/lib/clang/21" \
 		-rtlib=compiler-rt -fuse-ld=lld -std=c11 -D_GNU_SOURCE \
 		-O2 -Wall -Wextra -Werror -pthread -Wl,-z,max-page-size=16384 \
-		-I"$(PROJECT_DIR)/include" -I"$(PROJECT_DIR)/sdk/include" \
+		-I"$(PROJECT_DIR)/sdk/include" \
 		"$(PROJECT_DIR)/tests/nbdriver_smoke.c" "$(PROJECT_DIR)/sdk/src/client.c" \
 		-o "$(SMOKE_OUTPUT)"
 
@@ -42,6 +44,7 @@ loader:
 	$(SMOKE_CC) -std=c11 -Wall -Wextra -Werror \
 		-I"$(PROJECT_DIR)/sdk/include" \
 		"$(PROJECT_DIR)/tools/nbdriver_loader.c" \
+		"$(PROJECT_DIR)/tools/nbdriver_patch.c" \
 		-o "$(LOADER_OUTPUT)"
 
 clean: check-source check-kdir

@@ -10,16 +10,17 @@ struct task_struct;
 struct mm_struct;
 struct nbdriver_read_request;
 
-/* The syscall-18 bootstrap is intentionally limited to root and Android
- * system callers.  SurfaceFlinger workers inherit uid 1000 even when their
- * thread name changes after injection. */
+/* 连接 worker 允许 root / Android system。此 helper 只检查 euid，
+ * 不是 SF 可执行文件认证；读取分支与查询分支使用该例外。
+ * 写入、devpts 状态和 SF_GROUPS 各有独立门禁，不能据此一并放行。 */
 static inline bool nbdriver_sf_read_caller(void)
 {
 	return uid_eq(current_euid(), GLOBAL_ROOT_UID) ||
 		uid_eq(current_euid(), KUIDT_INIT(1000));
 }
 
-/* Returns an mm reference or ERR_PTR; preserves the existing ptrace/LSM checks. */
+/* 返回 mm_users 引用、NULL 或 ERR_PTR，调用方负责 mmput。
+ * root/system 读取走 get_task_mm，其余路径使用对应 ptrace/LSM 模式。 */
 struct mm_struct *nbdriver_access_mm(struct task_struct *task);
 /* Caller owns an mm_users reference; false never faults missing pages in. */
 int nbdriver_read_mm(struct mm_struct *mm, struct nbdriver_read_request *request,

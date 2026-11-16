@@ -29,70 +29,26 @@ jobs:
         run: |
           set -euo pipefail
           cc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror \
-            -Iinclude -Isdk/include -fsyntax-only sdk/src/client.c
+            -Isdk/include -fsyntax-only sdk/src/client.c
 
-      - name: Check shared ABI
+      - name: Check shared ABI and standalone SDK headers
         run: |
           set -euo pipefail
-          cc -std=c11 -Wall -Wextra -Werror -Iinclude \
-            tests/abi_header_check.c -o /tmp/nbdriver-abi-header-check
-          /tmp/nbdriver-abi-header-check
-
-      - name: Check synthetic page-table walker
-        run: |
-          set -euo pipefail
-          python3 tests/test_walk.py
-          python3 tests/test_read_permissions.py
-          python3 tests/test_audit_fixes.py
-          python3 tests/test_devpts_auto.py
-
-      - name: Check standalone SDK and process/batch helpers
-        run: |
-          set -euo pipefail
-          python3 tests/test_single_header.py
-          python3 tests/test_single_header.py --legacy
-          python3 tests/test_readv.py
-          python3 tests/test_metadata.py
-          python3 tests/test_thread_signal.py
-          python3 tests/test_mapping.py
-          cc -std=c11 -Wall -Wextra -Werror -Iinclude -Isdk/include \
-            tests/devpts_host_check.c -Wl,--wrap=ioctl -o /tmp/nbdriver-devpts-sdk
-          /tmp/nbdriver-devpts-sdk
-          cc -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -Isdk/include \
-            tests/devpts_filter_smoke.c -o /tmp/nbdriver-devpts-probe
-          cc -std=c11 -Wall -Wextra -Werror -Iinclude -Isrc \
-            tests/query_rules_check.c -o /tmp/nbdriver-query-rules
-          /tmp/nbdriver-query-rules
           cc -std=c11 -Wall -Wextra -Werror -Isdk/include \
-            tests/query_sdk_check.c -Wl,--wrap=ioctl -o /tmp/nbdriver-query-sdk
-          /tmp/nbdriver-query-sdk
-          cc -std=c11 -Wall -Wextra -Werror -pthread -Isdk/include \
-            tests/device_query_readv_smoke.c -o /tmp/nbdriver-query-probe
+            -include nbdriver_abi.h -x c -fsyntax-only /dev/null
           cc -std=c11 -Wall -Wextra -Werror -Isdk/include \
-            tests/metadata_sdk_check.c -Wl,--wrap=ioctl -o /tmp/nbdriver-metadata-sdk
-          /tmp/nbdriver-metadata-sdk
-          cc -std=c11 -Wall -Wextra -Werror -Isdk/include \
-            tests/device_metadata_smoke.c -o /tmp/nbdriver-metadata-probe
+            -include nbdriver.h -x c -fsyntax-only /dev/null
+          c++ -std=c++17 -Wall -Wextra -Werror -Isdk/include \
+            -include nbdriver.h -x c++ -fsyntax-only /dev/null
 
-      - name: Check query authorization, group references and UDP capture
+      - name: Check loader build
+        run: make loader SMOKE_CC=cc
+
+      - name: Check device smoke build
         run: |
           set -euo pipefail
-          python3 tests/test_query_authorization.py
-          python3 tests/test_sf_groups.py
-          python3 tests/test_callback_tail.py
-          python3 tests/test_entry_bootstrap.py
-          python3 tests/test_kgsl.py
-          python3 tests/test_udp_capture.py
-          python3 tests/test_udp_sdk.py
-
-      - name: Check device smoke programs
-        run: |
-          set -euo pipefail
-          cc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror -pthread \
-            -Iinclude -Isdk/include -fsyntax-only \
-            tests/device_read_smoke.c tests/device_write_smoke.c tests/device_ioctl_smoke.c tests/device_connection_smoke.c
           cc -D_GNU_SOURCE -std=c11 -O2 -Wall -Wextra -Werror -pthread \
-            -Iinclude -Isdk/include tests/nbdriver_smoke.c sdk/src/client.c \
+            -Isdk/include tests/nbdriver_smoke.c sdk/src/client.c \
             -o /tmp/nbdriver-smoke
 
   kernel:

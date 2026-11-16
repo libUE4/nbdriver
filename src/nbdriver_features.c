@@ -1,5 +1,12 @@
 /* ===== BEGIN src/features/nbdriver_metadata.c ===== */
 // SPDX-License-Identifier: GPL-2.0-only
+/*
+ * 当前职责：maps/VMA/mapping、FD/KGSL/random、devpts 与 proc 可见性。
+ * 文件中的 BEGIN/END 标签保留来源边界，不是现有目录。
+ * 元数据、自动 devpts 与进程/GPU 过滤有不同权限和生命周期，不能相互代替。
+ * 可选 KGSL/proc 能力按后端发现或注册结果发布，feature 不保证所有厂商布局。
+ * devpts 随模块初始化自动绑定双包；状态 ioctl 只读，旧手动命令 0x1c 已退役。
+ */
 /* Read-only metadata adapted from workspace NBG-driver readonly.c/query.c
  * and socket_ioctl.c; use nbdriver's ABI, task identity and ptrace checks. */
 #include <linux/capability.h>
