@@ -12,9 +12,11 @@ SMOKE_CC ?= clang-18
 TUSI_PREBUILT := $(TUSI_NDK)/toolchains/llvm/prebuilt/linux-arm
 SMOKE_OUTPUT ?= $(PROJECT_DIR)/tests/nbdriver_smoke
 
+MODULE ?= $(PROJECT_DIR)/src/nbdriver.ko
+
 LOADER_OUTPUT ?= $(PROJECT_DIR)/out/nbdriver-loader
 
-.PHONY: all smoke loader clean check-source check-kdir help
+.PHONY: all smoke loader clean check-source check-kdir verify-module help
 
 check-source:
 	@grep -q '^obj-m' "$(PROJECT_DIR)/src/Makefile" || { echo "尚无参与编译的模块：请在 src/Makefile 定义 obj-m 与对象列表" >&2; exit 1; }
@@ -25,8 +27,15 @@ check-kdir:
 
 all: check-source check-kdir
 	$(MAKE) -C "$(KDIR)" M="$(PROJECT_DIR)/src" ARCH=$(ARCH) LLVM=$(LLVM) LLVM_IAS=$(LLVM_IAS) modules
+	$(MAKE) verify-module KDIR="$(KDIR)" MODULE="$(PROJECT_DIR)/src/nbdriver.ko"
 	mkdir -p "$(PROJECT_DIR)/out"
 	cp "$(PROJECT_DIR)/src/nbdriver.ko" "$(PROJECT_DIR)/out/nbdriver.ko"
+
+# Do not publish a successful link until target exports and the actual callback
+# have passed the same checks used by CI. A stale .ko is not a release artifact.
+verify-module: check-kdir
+	python3 "$(PROJECT_DIR)/tools/check_undefined.py" --symvers "$(KDIR)/Module.symvers" --module "$(MODULE)"
+	python3 "$(PROJECT_DIR)/tools/check_callback_tail.py" --module "$(MODULE)"
 
 smoke:
 	mkdir -p "$(dir $(SMOKE_OUTPUT))"
