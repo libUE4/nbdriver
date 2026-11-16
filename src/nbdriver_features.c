@@ -3323,9 +3323,33 @@ static int cpu_vis_thr_entry(struct kretprobe_instance *instance, struct pt_regs
     return cpu_vis_capture_entry(instance, regs);
 }
 
+/* Thread rows report 0.
+ *
+ * cpu_visibility_match() keys on task_tgid(), so every thread of the target
+ * group matches and cpu_vis_apply_return() handed each one the full group
+ * total. A 30-thread process therefore showed 219-240 ticks on every row
+ * instead of one row carrying the shaped value. The aggregate is shaped by the
+ * tgid hook (proc_tgid_stat); individual rows are shown as idle. */
 static int cpu_vis_thr_ret(struct kretprobe_instance *instance, struct pt_regs *regs)
 {
-    return cpu_vis_apply_return(instance, regs);
+    struct cpu_vis_args *args = (struct cpu_vis_args *)instance->data;
+    struct cpu_visibility_target *t = NULL;
+    int depth;
+
+    (void)regs;
+    if (!args || !READ_ONCE(cpu_visibility_active))
+        return 0;
+    if (!cpu_visibility_match(args->task, &t) || !t)
+        return 0;
+
+    depth = this_cpu_inc_return(cpu_visibility_depth);
+    if (depth > 1) {
+        this_cpu_dec(cpu_visibility_depth);
+        return 0;
+    }
+    cpu_visibility_rewrite(args, 0);
+    this_cpu_dec(cpu_visibility_depth);
+    return 0;
 }
 
 static int cpu_vis_ss_entry(struct kretprobe_instance *instance, struct pt_regs *regs)
