@@ -2943,10 +2943,10 @@ static void cpu_visibility_accrue(struct cpu_visibility_target *t, u64 now_ns)
 {
     u64 delta, steps, add, slice;
 
+    if (!t->current_pct)
+        t->current_pct = t->pct_lo;
     if (!t->last_ns) {
         t->last_ns = now_ns;
-        if (!t->current_pct)
-            t->current_pct = t->pct_lo;
         return;
     }
     if (now_ns <= t->last_ns)
@@ -2968,41 +2968,43 @@ static void cpu_visibility_accrue(struct cpu_visibility_target *t, u64 now_ns)
     t->syn_s += add - div_u64(add * 2ull, 3ull);
 }
 
+/* Lock-free lookup. The target table is only mutated from process context
+ * with cpu_visibility_lock held, and pid references stay pinned for the whole
+ * registration lifetime, so READ_ONCE over the array is sufficient here.
+ * This must never sleep, allocate or take cpu_visibility_lock: the kernel may
+ * nest thread_group_cputime_adjusted() inside task_cputime_adjusted(). */
 static bool cpu_visibility_match(struct task_struct *task,
-    struct cpu_visibility_target **out, unsigned long *flags)
+    struct cpu_visibility_target **out)
 {
-    struct cpu_visibility_target *t;
     struct pid *tgid;
     unsigned int i;
-    bool hit = false;
 
-    if (!task || !READ_ONCE(cpu_visibility_count))
+    if (!task)
         return false;
     tgid = task_tgid(task);
-    if (!tgid)
+    if (!tgid || !READ_ONCE(cpu_visibility_count))
         return false;
-    spin_lock_irqsave(&cpu_visibility_lock, *flags);
     for (i = 0; i < ARRAY_SIZE(cpu_visibility_targets); i++) {
-        t = &cpu_visibility_targets[i];
-        if (t->identity && t->identity == tgid) {
+        struct cpu_visibility_target *t = &cpu_visibility_targets[i];
+        if (READ_ONCE(t->identity) == tgid) {
             *out = t;
-            hit = true;
-            break;
+            return true;
         }
     }
-    spin_unlock_irqrestore(&cpu_visibility_lock, *flags);
-    return hit;
+    return false;
 }
 
-/* Replace the two cputime values a reader is about to receive. Layout follows
- * the kernel's own prototype: (task, u64 *utime, u64 *stime). */
+/* Arguments captured at function entry. The kretprobe handler runs after the
+ * probed function returned, so x0/x1/x2 no longer hold the arguments then:
+ * reading them there yields return values (or garbage) and writing through
+ * them is what faulted. Only this entry-time copy is ever used. */
 struct cpu_vis_args {
     struct task_struct *task;
     u64 *utime;
     u64 *stime;
 };
 
-static bool cpu_visibility_store_args(struct pt_regs *regs, struct cpu_vis_args *args)
+static bool cpu_visibility_capture(struct pt_regs *regs, struct cpu_vis_args *args)
 {
     args->task = (struct task_struct *)(unsigned long)regs->regs[0];
     args->utime = (u64 *)(unsigned long)regs->regs[1];
@@ -3010,59 +3012,87 @@ static bool cpu_visibility_store_args(struct pt_regs *regs, struct cpu_vis_args 
     return args->task && args->utime && args->stime;
 }
 
-/* Both probes share the same rewrite: run after the original so the values are
- * the ones a reader would otherwise see. */
-static int cpu_visibility_rewrite(struct pt_regs *regs)
+/* Both probes share the same rewrite. It runs in kretprobe context, so it must
+ * stay atomic and must never contend: if the lock is already held (nested
+ * cputime call on the same CPU) the probe simply lets the original value pass
+ * instead of blocking, which is what keeps the machine alive. */
+/* Nested cputime calls are possible on one CPU (thread_group_* can be built
+ * from task_*). A per-CPU depth guard keeps the probe out of the inner call
+ * entirely instead of relying on lock timing. */
+static DEFINE_PER_CPU(int, cpu_visibility_depth);
+
+static int cpu_visibility_rewrite(const struct cpu_vis_args *captured)
 {
     struct cpu_visibility_target *t = NULL;
-    struct cpu_vis_args args;
+    const struct cpu_vis_args *args = captured;
     unsigned long flags;
     u64 syn_u, syn_s;
+    int depth;
 
     if (!READ_ONCE(cpu_visibility_active))
         return 0;
-    memset(&args, 0, sizeof(args));
-    if (!cpu_visibility_store_args(regs, &args))
+    if (!args || !args->task || !args->utime || !args->stime)
         return 0;
-    if (!cpu_visibility_match(args.task, &t, &flags))
+    depth = this_cpu_inc_return(cpu_visibility_depth);
+    if (depth > 1) {
+        this_cpu_dec(cpu_visibility_depth);
         return 0;
-    if (t) {
-        spin_lock_irqsave(&cpu_visibility_lock, flags);
-        cpu_visibility_accrue(t, ktime_get_mono_fast_ns());
-        syn_u = t->syn_u;
-        syn_s = t->syn_s;
-        t->hits++;
-        spin_unlock_irqrestore(&cpu_visibility_lock, flags);
-        WRITE_ONCE(*args.utime, syn_u);
-        WRITE_ONCE(*args.stime, syn_s);
     }
+    if (!cpu_visibility_match(args->task, &t) || !t)
+        goto out;
+    if (!spin_trylock_irqsave(&cpu_visibility_lock, flags))
+        goto out;
+    cpu_visibility_accrue(t, ktime_get_mono_fast_ns());
+    syn_u = t->syn_u;
+    syn_s = t->syn_s;
+    t->hits++;
+    spin_unlock_irqrestore(&cpu_visibility_lock, flags);
+    WRITE_ONCE(*args->utime, syn_u);
+    WRITE_ONCE(*args->stime, syn_s);
+out:
+    this_cpu_dec(cpu_visibility_depth);
     return 0;
+}
+
+/* Entry runs with the real arguments still live in x0/x1/x2. Capture them into
+ * the per-instance buffer; returning 1 would skip the return handler. */
+static int cpu_vis_capture_entry(struct kretprobe_instance *instance,
+    struct pt_regs *regs)
+{
+    struct cpu_vis_args *args = (struct cpu_vis_args *)instance->data;
+
+    if (!args)
+        return 1;
+    if (!READ_ONCE(cpu_visibility_active))
+        return 1;
+    return cpu_visibility_capture(regs, args) ? 0 : 1;
+}
+
+static int cpu_vis_apply_return(struct kretprobe_instance *instance,
+    struct pt_regs *regs)
+{
+    (void)regs;
+    return cpu_visibility_rewrite((const struct cpu_vis_args *)instance->data);
 }
 
 static int cpu_vis_tg_entry(struct kretprobe_instance *instance, struct pt_regs *regs)
 {
-    (void)instance;
-    (void)regs;
-    return 0;
+    return cpu_vis_capture_entry(instance, regs);
 }
 
 static int cpu_vis_tg_ret(struct kretprobe_instance *instance, struct pt_regs *regs)
 {
-    (void)instance;
-    return cpu_visibility_rewrite(regs);
+    return cpu_vis_apply_return(instance, regs);
 }
 
 static int cpu_vis_thr_entry(struct kretprobe_instance *instance, struct pt_regs *regs)
 {
-    (void)instance;
-    (void)regs;
-    return 0;
+    return cpu_vis_capture_entry(instance, regs);
 }
 
 static int cpu_vis_thr_ret(struct kretprobe_instance *instance, struct pt_regs *regs)
 {
-    (void)instance;
-    return cpu_visibility_rewrite(regs);
+    return cpu_vis_apply_return(instance, regs);
 }
 
 static void cpu_visibility_drop_hooks(void)
@@ -3085,6 +3115,7 @@ static int cpu_visibility_install_hooks(void)
     cpu_vis_tg_probe.kp.symbol_name = "thread_group_cputime_adjusted";
     cpu_vis_tg_probe.entry_handler = cpu_vis_tg_entry;
     cpu_vis_tg_probe.handler = cpu_vis_tg_ret;
+    cpu_vis_tg_probe.data_size = sizeof(struct cpu_vis_args);
     cpu_vis_tg_probe.maxactive = max(num_possible_cpus() * 8, 128U);
     ret = register_kretprobe(&cpu_vis_tg_probe);
     if (ret)
@@ -3095,6 +3126,7 @@ static int cpu_visibility_install_hooks(void)
     cpu_vis_thr_probe.kp.symbol_name = "task_cputime_adjusted";
     cpu_vis_thr_probe.entry_handler = cpu_vis_thr_entry;
     cpu_vis_thr_probe.handler = cpu_vis_thr_ret;
+    cpu_vis_thr_probe.data_size = sizeof(struct cpu_vis_args);
     cpu_vis_thr_probe.maxactive = max(num_possible_cpus() * 8, 128U);
     ret = register_kretprobe(&cpu_vis_thr_probe);
     if (ret) {
@@ -3123,6 +3155,7 @@ long nbdriver_cpu_visibility_ioctl(unsigned long argument)
     struct pid *identity = NULL, *drop = NULL;
     unsigned long flags;
     unsigned int i, empty = ARRAY_SIZE(cpu_visibility_targets);
+    bool found = false;
     int ret = 0;
 
     if (copy_from_user(&req, (void __user *)argument, sizeof(req)))
@@ -3160,18 +3193,22 @@ long nbdriver_cpu_visibility_ioctl(unsigned long argument)
             continue;
         if (req.operation == NBDRIVER_CPU_VISIBILITY_CLEAR) {
             cpu_visibility_release_locked(i, &drop);
-        } else {
+        } else if (req.operation == NBDRIVER_CPU_VISIBILITY_SET) {
+            /* Only SET may change the configured range. QUERY above reaches
+             * this loop too and must stay read-only. */
             t->pct_lo = req.pct_lo;
             t->pct_hi = req.pct_hi;
             if (t->current_pct < req.pct_lo || t->current_pct > req.pct_hi)
                 t->current_pct = req.pct_lo;
-            req.current_pct = t->current_pct;
-            req.hits = t->hits;
         }
+        req.current_pct = t->current_pct;
+        req.pct_lo = t->pct_lo;
+        req.pct_hi = t->pct_hi;
+        req.hits = t->hits;
+        found = true;
         break;
     }
-    if (identity && req.operation == NBDRIVER_CPU_VISIBILITY_SET &&
-        i == ARRAY_SIZE(cpu_visibility_targets) && !req.hits) {
+    if (identity && req.operation == NBDRIVER_CPU_VISIBILITY_SET && !found) {
         if (empty == ARRAY_SIZE(cpu_visibility_targets)) {
             ret = -ENOSPC;
         } else {
