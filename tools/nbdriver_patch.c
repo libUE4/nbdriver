@@ -145,8 +145,30 @@ static int elf_ready(const unsigned char *buf, size_t size,
 	    !range_ok(eh->e_shoff,
 		      (uint64_t)eh->e_shnum * sizeof(Elf64_Shdr), size))
 		return -EINVAL;
-	if (eh->e_shstrndx >= eh->e_shnum)
+	if (eh->e_shstrndx == SHN_UNDEF || eh->e_shstrndx >= eh->e_shnum)
 		return -EINVAL;
+	{
+		const Elf64_Shdr *sections = (const Elf64_Shdr *)(buf + eh->e_shoff);
+		const Elf64_Shdr *names = &sections[eh->e_shstrndx];
+		size_t i;
+
+		if (names->sh_type != SHT_STRTAB ||
+		    !range_ok(names->sh_offset, names->sh_size, size))
+			return -EINVAL;
+		for (i = 0; i < eh->e_shnum; ++i) {
+			const Elf64_Shdr *section = &sections[i];
+
+			if (section->sh_name >= names->sh_size ||
+			    !memchr(buf + names->sh_offset + section->sh_name, '\0',
+				    names->sh_size - section->sh_name) ||
+			    (section->sh_addralign &&
+			     (section->sh_addralign & (section->sh_addralign - 1))) ||
+			    (section->sh_type != SHT_NOBITS && section->sh_type != SHT_NULL &&
+			     (!range_ok(section->sh_offset, section->sh_size, size) ||
+			      (section->sh_addralign && section->sh_offset % section->sh_addralign))))
+				return -EINVAL;
+		}
+	}
 	*eh_out = eh;
 	return 0;
 }
@@ -234,6 +256,15 @@ static int load_kallsyms(const char *path, struct ksym **out, size_t *count_out,
 		nl = strchr(p, '\n');
 		if (nl)
 			*nl = '\0';
+		/* Module-owned addresses need normal dependency tracking; never turn
+		 * them into unreferenced absolute imports. */
+		{
+			char *owner = p;
+			while (*owner == ' ' || *owner == '\t')
+				++owner;
+			if (*owner == '[')
+				continue;
+		}
 		*p = '\0';
 		if (!addr)
 			continue;
@@ -288,14 +319,22 @@ static int load_kallsyms(const char *path, struct ksym **out, size_t *count_out,
 }
 
 static const struct ksym *find_sym(const struct ksym *syms, size_t count,
-				   const char *name)
+					   const char *name, int *ambiguous)
 {
+	const struct ksym *hit = NULL;
 	size_t i;
 
-	for (i = 0; i < count; ++i)
-		if (strcmp(syms[i].name, name) == 0)
-			return &syms[i];
-	return NULL;
+	*ambiguous = 0;
+	for (i = 0; i < count; ++i) {
+		if (strcmp(syms[i].name, name) != 0)
+			continue;
+		if (hit && hit->addr != syms[i].addr) {
+			*ambiguous = 1;
+			return NULL;
+		}
+		hit = &syms[i];
+	}
+	return hit;
 }
 
 static size_t allowed_index(const char *name, const char *const *allow,
@@ -403,6 +442,7 @@ int nbdriver_patch_symbols(const char *in_path, const char *out_path,
 		const char *name;
 		const struct ksym *hit;
 		size_t allow_idx;
+		int ambiguous;
 
 		/* Only undefined imports are candidates. */
 		if (sym->st_shndx != SHN_UNDEF || sym->st_name == 0)
@@ -427,9 +467,10 @@ int nbdriver_patch_symbols(const char *in_path, const char *out_path,
 		allow_idx = allowed_index(name, allow, allow_count);
 		if (allow_idx == SIZE_MAX)
 			continue;
-		hit = find_sym(syms, sym_count, name);
+		hit = find_sym(syms, sym_count, name, &ambiguous);
 		if (!hit) {
-			snprintf(log, log_size, "allowlisted_symbol_not_in_kallsyms");
+			snprintf(log, log_size, "%s", ambiguous ?
+				 "allowlisted_symbol_ambiguous" : "allowlisted_symbol_not_in_kallsyms");
 			free(matched);
 			free_syms(syms, sym_count);
 			free(buf);
@@ -454,7 +495,8 @@ int nbdriver_patch_symbols(const char *in_path, const char *out_path,
 	rc = write_whole(out_path, buf, size, 0600);
 	free(matched);
 	if (rc < 0) {
-		snprintf(log, log_size, "write_failed");
+		snprintf(log, log_size, "%s errno=%d",
+			 rc == -EEXIST ? "output_exists" : "write_failed", -rc);
 	} else {
 		snprintf(log, log_size, "patched=%d", patched);
 		if (patched_out)
@@ -469,9 +511,8 @@ int nbdriver_patch_symbols(const char *in_path, const char *out_path,
  * Rebuild the .modinfo section content with a replaced vermagic entry.
  *
  * The section is a run of NUL terminated "key=value" strings. Rebuilding
- * keeps every other entry byte-identical and allows a different length, but
- * the new section cannot exceed the old one in place, so the whole file is
- * re-emitted: the section body is swapped and trailing section data shifts.
+ * keeps every other entry byte-identical and allows a different length.
+ * The new body is appended; other section offsets and alignments never move.
  */
 int nbdriver_patch_vermagic(const char *in_path, const char *out_path,
 			    const char *magic, int *changed_out,
@@ -484,17 +525,17 @@ int nbdriver_patch_vermagic(const char *in_path, const char *out_path,
 	long modinfo = -1;
 	size_t i;
 	const char *old;
-	size_t old_len, new_len, old_body, new_total;
+	size_t old_len, new_len, new_total;
 	unsigned char *out = NULL;
 	char *body = NULL;
-	size_t cursor = 0;
+	size_t cursor = 0, selected = 0;
 	int rc, replaced = 0, changed = 0;
 
 	if (changed_out)
 		*changed_out = 0;
 	if (log && log_size)
 		log[0] = '\0';
-	if (!magic || !*magic || strpbrk(magic, " \t\r\n")) {
+	if (!magic || !*magic || strpbrk(magic, " \t\r\n\f\v")) {
 		snprintf(log, log_size, "invalid_release");
 		return -EINVAL;
 	}
@@ -548,15 +589,37 @@ int nbdriver_patch_vermagic(const char *in_path, const char *out_path,
 		free(buf);
 		return -ENOENT;
 	}
-	if (!range_ok(sh[modinfo].sh_offset, sh[modinfo].sh_size, size)) {
+	if (sh[modinfo].sh_type != SHT_PROGBITS ||
+	    (sh[modinfo].sh_flags & SHF_COMPRESSED) ||
+	    !range_ok(sh[modinfo].sh_offset, sh[modinfo].sh_size, size)) {
 		snprintf(log, log_size, "modinfo_out_of_range");
 		free(buf);
 		return -EINVAL;
 	}
 
+	{
+		const uint64_t start = sh[modinfo].sh_offset;
+		const uint64_t end = start + sh[modinfo].sh_size;
+		const uint64_t table_end = eh->e_shoff +
+			(uint64_t)eh->e_shnum * sizeof(Elf64_Shdr);
+
+		if (start < sizeof(Elf64_Ehdr) || (start < table_end && end > eh->e_shoff)) {
+			free(buf);
+			return -EINVAL;
+		}
+		for (i = 0; i < eh->e_shnum; ++i) {
+			if (i == (size_t)modinfo || sh[i].sh_type == SHT_NOBITS || !sh[i].sh_size)
+				continue;
+			if (sh[i].sh_offset < end && sh[i].sh_offset + sh[i].sh_size > start) {
+				snprintf(log, log_size, "section_overlaps_modinfo");
+				free(buf);
+				return -EINVAL;
+			}
+		}
+	}
+
 	old = (const char *)buf + sh[modinfo].sh_offset;
 	old_len = sh[modinfo].sh_size;
-	old_body = old_len;
 
 	/* Find the existing vermagic entry inside the section body. */
 	for (cursor = 0; cursor < old_len;) {
@@ -571,8 +634,13 @@ int nbdriver_patch_vermagic(const char *in_path, const char *out_path,
 		}
 		if (entry_len >= strlen(VERMAGIC_KEY) &&
 		    memcmp(entry, VERMAGIC_KEY, strlen(VERMAGIC_KEY)) == 0) {
+			if (replaced || entry_len == strlen(VERMAGIC_KEY)) {
+				snprintf(log, log_size, "invalid_or_duplicate_vermagic");
+				free(buf);
+				return -EINVAL;
+			}
 			replaced = 1;
-			break;
+			selected = cursor;
 		}
 		cursor += entry_len + 1;
 	}
@@ -582,6 +650,7 @@ int nbdriver_patch_vermagic(const char *in_path, const char *out_path,
 		return -ENOENT;
 	}
 
+	cursor = selected;
 	if (strlen(magic) > SIZE_MAX - strlen(VERMAGIC_KEY) - 1) {
 		free(buf);
 		return -EOVERFLOW;
@@ -631,120 +700,49 @@ int nbdriver_patch_vermagic(const char *in_path, const char *out_path,
 		memcpy(body + cursor + new_len,
 		       old + cursor + old_entry_len + 1,
 		       old_len - (cursor + old_entry_len + 1));
+		changed = new_len != old_entry_len + 1 ||
+			memcmp(old + cursor, replacement, new_len) != 0;
 		free(replacement);
-		changed = 1;
 
-		/*
-		 * Re-emit the image with the resized section body, then move the
-		 * section header table and every section that sat after .modinfo.
-		 */
+		/* Append only the rebuilt metadata. All existing section offsets,
+		 * alignment, relocation targets and the section table stay intact. */
 		{
-			const uint64_t sec_off = sh[modinfo].sh_offset;
-			uint64_t tail_off;
-			size_t new_size, new_span;
-			int grows = body_len > old_body;
-			uint64_t delta, raw_delta = grows ? body_len - old_body :
-				old_body - body_len;
-			Elf64_Ehdr *n_eh;
+			const uint64_t limit = 16U * 1024U * 1024U;
+			const uint64_t alignment = sh[modinfo].sh_addralign ?
+				sh[modinfo].sh_addralign : 1;
+			uint64_t offset;
 			Elf64_Shdr *n_sh;
 
-			if (!range_ok(sec_off, old_body, size) ||
-			    !range_ok(eh->e_shoff,
-				      (uint64_t)eh->e_shnum * sizeof(Elf64_Shdr), size) ||
-			    eh->e_shoff % _Alignof(Elf64_Shdr) != 0) {
+			if (size > limit || alignment > limit) {
 				free(body);
 				free(buf);
-				return -EOVERFLOW;
+				return -EFBIG;
 			}
-			tail_off = sec_off + old_body;
-			if (eh->e_shoff < tail_off) {
+			offset = ((uint64_t)size + alignment - 1) & ~(alignment - 1);
+			if (!range_ok(offset, body_len, (size_t)limit)) {
 				free(body);
 				free(buf);
-				return -EINVAL;
+				return -EFBIG;
 			}
-			for (i = 0; i < eh->e_shnum; ++i) {
-				uint64_t other_end;
-
-				if (i == (size_t)modinfo || sh[i].sh_type == SHT_NOBITS ||
-				    sh[i].sh_size == 0)
-					continue;
-				if (!range_ok(sh[i].sh_offset, sh[i].sh_size, size)) {
-					snprintf(log, log_size, "section_out_of_range");
-					free(body);
-					free(buf);
-					return -EINVAL;
-				}
-				other_end = sh[i].sh_offset + sh[i].sh_size;
-				if (sh[i].sh_offset < tail_off && other_end > sec_off) {
-					snprintf(log, log_size, "section_overlaps_modinfo");
-					free(body);
-					free(buf);
-					return -EINVAL;
-				}
-			}
-			if (grows) {
-				if (raw_delta > SIZE_MAX - 7) {
-					free(body);
-					free(buf);
-					return -EOVERFLOW;
-				}
-				delta = (raw_delta + 7) & ~UINT64_C(7);
-			} else {
-				delta = raw_delta & ~UINT64_C(7);
-			}
-			if (delta > SIZE_MAX || (grows && delta > SIZE_MAX - size) ||
-			    (!grows && delta > size)) {
-				free(body);
-				free(buf);
-				return -EOVERFLOW;
-			}
-			new_size = grows ? size + (size_t)delta : size - (size_t)delta;
-			new_span = grows ? old_body + (size_t)delta :
-				old_body - (size_t)delta;
-
-			out = malloc(new_size);
+			new_total = (size_t)offset + body_len;
+			out = calloc(1, new_total);
 			if (!out) {
 				free(body);
 				free(buf);
 				return -ENOMEM;
 			}
-			memcpy(out, buf, sec_off);
-			memcpy(out + sec_off, body, body_len);
-			memset(out + sec_off + body_len, 0, new_span - body_len);
-			memcpy(out + sec_off + new_span, buf + tail_off, size - tail_off);
-
-			n_eh = (Elf64_Ehdr *)out;
-			n_eh->e_shoff = grows ? eh->e_shoff + delta : eh->e_shoff - delta;
-			n_sh = (Elf64_Shdr *)(out + n_eh->e_shoff);
-			n_sh[modinfo].sh_size = (uint64_t)body_len;
-			for (i = 0; i < n_eh->e_shnum; ++i) {
-				if (i == (size_t)modinfo || n_sh[i].sh_offset < tail_off)
-					continue;
-				if (grows) {
-					if (n_sh[i].sh_offset > UINT64_MAX - delta) {
-						free(out);
-						free(body);
-						free(buf);
-						return -EOVERFLOW;
-					}
-					n_sh[i].sh_offset += delta;
-				} else {
-					if (n_sh[i].sh_offset < delta) {
-						free(out);
-						free(body);
-						free(buf);
-						return -EOVERFLOW;
-					}
-					n_sh[i].sh_offset -= delta;
-				}
-			}
-			new_total = new_size;
+			memcpy(out, buf, size);
+			memcpy(out + offset, body, body_len);
+			n_sh = (Elf64_Shdr *)(out + eh->e_shoff);
+			n_sh[modinfo].sh_offset = offset;
+			n_sh[modinfo].sh_size = body_len;
 		}
 	}
 
 	rc = write_whole(out_path, out, new_total, 0600);
 	if (rc < 0) {
-		snprintf(log, log_size, "write_failed");
+		snprintf(log, log_size, "%s errno=%d",
+			 rc == -EEXIST ? "output_exists" : "write_failed", -rc);
 	} else {
 		snprintf(log, log_size, "vermagic=%s replaced=%d", magic, replaced);
 		if (changed_out)

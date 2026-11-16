@@ -516,8 +516,42 @@ struct nbdriver_udp_read_request {
 #define NBDRIVER_IOC_UDP_STATUS \
     _IOR(NBDRIVER_IOC_MAGIC, 0x28, struct nbdriver_udp_status)
 
-/* CPU telemetry shaping, additive ABI 5. Mirrors nbdriver_abi.h. */
+/* CPU telemetry shaping, additive ABI 5. Mirrors nbdriver_abi.h. Rewrites what
+ * the proc seq_file handlers report for one thread group; real accounting and
+ * scheduling are untouched. */
 #define NBDRIVER_FEATURE_CPU_VISIBILITY (1U << 24)
+/* Suppresses the hidden pid in /sys/fs/cgroup/cgroup.{procs,threads} and
+ * /proc/locks, which are world readable and not covered by PROC_VISIBILITY.
+ * Enablement follows PROC_VISIBILITY; mirrors nbdriver_abi.h. */
+#define NBDRIVER_FEATURE_PID_TABLE_VISIBILITY (1U << 25)
+
+/* Suppresses this module's own name in /proc/modules, so an unprivileged app
+ * cannot read that a third-party driver named nbdriver is loaded. Mirrors
+ * nbdriver_abi.h. */
+#define NBDRIVER_FEATURE_MODULE_TRACE_VISIBILITY (1U << 26)
+
+/* Drops this module's own symbol rows from /proc/kallsyms, so the ~800
+ * nbdriver_* names do not reveal what the driver does. Mirrors
+ * nbdriver_abi.h. */
+#define NBDRIVER_FEATURE_KALLSYMS_VISIBILITY (1U << 27)
+
+/* Drops /sys/module/nbdriver from the sysfs directory listing, so the module
+ * name and its srcversion/build-id are not enumerated. Mirrors
+ * nbdriver_abi.h. */
+#define NBDRIVER_FEATURE_SYSFS_MODULE_VISIBILITY (1U << 28)
+
+/* Makes pidfd_open(2) and kill/tkill/tgkill report ESRCH for hidden pids.
+ * Those syscalls resolve pids without touching procfs, so without this an
+ * unprivileged app can binary-probe every pid and confirm a hidden process
+ * exists. Mirrors nbdriver_abi.h. */
+#define NBDRIVER_FEATURE_PIDFD_VISIBILITY (1U << 29)
+
+/* Drops this module's own pr_* records at vprintk_store(), so its name never
+ * enters the printk ring buffer. Unlike dmesg_restrict this affects only this
+ * module's messages, leaving the kernel log available to everything else.
+ * Mirrors nbdriver_abi.h. */
+#define NBDRIVER_FEATURE_PRINTK_VISIBILITY (1U << 30)
+
 #define NBDRIVER_CPU_VISIBILITY_QUERY 0U
 #define NBDRIVER_CPU_VISIBILITY_SET   1U
 #define NBDRIVER_CPU_VISIBILITY_CLEAR 2U

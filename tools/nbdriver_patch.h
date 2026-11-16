@@ -31,9 +31,11 @@ int nbdriver_patch_symbols(const char *in_path, const char *out_path,
 
 /*
  * Replace the release token in the .modinfo "vermagic=" entry with @magic,
- * preserving the original feature/architecture suffix. The section is rebuilt
+ * preserving the original space-separated feature/architecture suffix. Pass
+ * the complete target release (uname -r), including its hyphenated parts.
+ * The section is rebuilt
  * rather than truncated, so the new string may be longer or shorter than the
- * original. Returns 0 on success and sets @changed_out to 1 when the entry
+ * original; other section offsets stay unchanged. Returns 0 on success and sets @changed_out to 1 when the entry
  * actually differed.
  */
 int nbdriver_patch_vermagic(const char *in_path, const char *out_path,

