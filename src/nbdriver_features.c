@@ -2936,12 +2936,13 @@ static u32 cpu_visibility_walk(struct cpu_visibility_target *t, u32 seed)
     return next;
 }
 
-/* Called under the lock in atomic context. Accrues synthesised cputime for the
- * whole elapsed slice in one pass: the bound is on the composed rate, so an
- * averaged walk is enough and no per-step loop runs here. */
+/* Called under the lock in atomic context. The synthesised rate is held fixed
+ * for one four-second segment and only then steps to a neighbour, so a reader
+ * window sized like top's (a couple of seconds) sits inside a single rate and
+ * differences to a value inside [lo, hi] instead of mixing several rates. */
 static void cpu_visibility_accrue(struct cpu_visibility_target *t, u64 now_ns)
 {
-    u64 delta, steps, add, slice;
+    u64 delta, now_slot, i, slice;
 
     if (!t->current_pct)
         t->current_pct = t->pct_lo;
@@ -2952,20 +2953,24 @@ static void cpu_visibility_accrue(struct cpu_visibility_target *t, u64 now_ns)
     if (now_ns <= t->last_ns)
         return;
     delta = now_ns - t->last_ns;
-    steps = div_u64(delta, CPU_VIS_NSEC_PER_HZ);
-    if (!steps)
+
+    /* Advance the rate once per whole second; carry the remainder so the
+     * synthesised total never drifts behind wall time. */
+    now_slot = div_u64(delta, 4000000000ull);
+    if (!now_slot)
         return;
-    t->last_ns += steps * CPU_VIS_NSEC_PER_HZ;
-    t->window = (t->window + (u32)steps) % 1000;
-    t->current_pct = cpu_visibility_walk(t, (u32)(t->number + t->window));
-    /* current_pct is a percent of one core; steps slices cover the delta. */
-    slice = div_u64((u64)t->current_pct * CPU_VIS_NSEC_PER_HZ, 100ull);
-    if (steps && slice > div64_u64((u64)-1, steps))
-        add = (u64)-1;
-    else
-        add = slice * steps;
-    t->syn_u += div_u64(add * 2ull, 3ull);
-    t->syn_s += add - div_u64(add * 2ull, 3ull);
+    if (now_slot > 900)           /* clamp a long stall instead of bursting */
+        now_slot = 900;
+    t->last_ns += now_slot * 4000000000ull;
+
+    for (i = 0; i < now_slot; i++) {
+        t->window = (t->window + 1) % 1000;
+        t->current_pct = cpu_visibility_walk(t, (u32)(t->number + t->window));
+        /* four seconds at current_pct of one core */
+        slice = div_u64((u64)t->current_pct * 4000000000ull, 100ull);
+        t->syn_u += div_u64(slice * 2ull, 3ull);
+        t->syn_s += slice - div_u64(slice * 2ull, 3ull);
+    }
 }
 
 /* Lock-free lookup. The target table is only mutated from process context
