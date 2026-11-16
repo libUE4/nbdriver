@@ -2916,8 +2916,12 @@ static int cpu_visibility_error;
 
 static struct kretprobe cpu_vis_tg_probe;
 static struct kretprobe cpu_vis_thr_probe;
+static struct kretprobe cpu_vis_ss_probe;
+static struct kretprobe cpu_vis_sched_probe;
 static bool cpu_vis_tg_hooked;
 static bool cpu_vis_thr_hooked;
+static bool cpu_vis_ss_hooked;
+static bool cpu_vis_sched_hooked;
 static DEFINE_PER_CPU(int, cpu_visibility_depth);
 
 /* Deterministic walk inside [lo, hi]; no allocation, no RNG. */
@@ -3015,6 +3019,10 @@ struct cpu_vis_args {
     struct seq_file *m;
 };
 
+/* proc_tgid_stat()/proc_tid_stat()/proc_pid_schedstat() share one layout:
+ *   (struct seq_file *m, struct pid_namespace *ns,
+ *    struct pid *pid, struct task_struct *task)
+ * so m is argument 0 and task is argument 3. */
 static int cpu_vis_capture_entry(struct kretprobe_instance *instance,
     struct pt_regs *regs)
 {
@@ -3022,10 +3030,24 @@ static int cpu_vis_capture_entry(struct kretprobe_instance *instance,
 
     if (!args || !READ_ONCE(cpu_visibility_active))
         return 1;
-    /* proc_tgid_stat(struct seq_file *m, struct pid_namespace *ns,
-     *                struct pid *pid, struct task_struct *task) */
     args->m = (struct seq_file *)(unsigned long)regs->regs[0];
     args->task = (struct task_struct *)(unsigned long)regs->regs[3];
+    return (args->m && args->task) ? 0 : 1;
+}
+
+/* proc_sched_show_task() has a different layout:
+ *   (struct task_struct *p, struct pid_namespace *ns, struct seq_file *m)
+ * Reading it with the layout above treated the task pointer as a seq_file,
+ * which is what dereferenced into the machine freeze. */
+static int cpu_vis_capture_entry_sched(struct kretprobe_instance *instance,
+    struct pt_regs *regs)
+{
+    struct cpu_vis_args *args = (struct cpu_vis_args *)instance->data;
+
+    if (!args || !READ_ONCE(cpu_visibility_active))
+        return 1;
+    args->task = (struct task_struct *)(unsigned long)regs->regs[0];
+    args->m = (struct seq_file *)(unsigned long)regs->regs[2];
     return (args->m && args->task) ? 0 : 1;
 }
 
@@ -3095,6 +3117,167 @@ static int cpu_visibility_rewrite(struct cpu_vis_args *args, u64 ticks)
     return 0;
 }
 
+/* schedstat prints "%llu %llu %lu\n": runtime, run_delay, pcount. Readers such
+ * as Scene difference the first field. The whole line is rebuilt with the same
+ * separators, and only accepted when it is no longer than the original, so the
+ * buffer length and field boundaries can never move. */
+static int cpu_visibility_rewrite_schedstat(struct cpu_vis_args *args, u64 ns)
+{
+    char tmp[80];
+    unsigned long long wait;
+    unsigned long pc;
+    int newlen, oldlen;
+    char *buf;
+
+    if (!args->m || !args->m->buf || args->m->count < 4)
+        return 0;
+    buf = args->m->buf;
+
+    /* Parse the two trailing fields so they survive unchanged. */
+    wait = 0;
+    pc = 0;
+    if (sscanf(buf, "%*u %llu %lu", &wait, &pc) != 2) {
+        wait = 0;
+        pc = 0;
+    }
+
+    oldlen = 0;
+    while (oldlen < (int)args->m->count && buf[oldlen] != '\n')
+        oldlen++;
+    if (oldlen <= 0)
+        return 0;
+
+    newlen = snprintf(tmp, sizeof(tmp), "%llu %llu %lu",
+                      (unsigned long long)ns, wait, pc);
+    if (newlen <= 0 || newlen > oldlen)
+        return 0;
+
+    memcpy(buf, tmp, newlen);
+    /* keep the line terminator where it was; pad the gap with spaces */
+    memset(buf + newlen, ' ', oldlen - newlen);
+    buf[oldlen] = '\n';
+    return 0;
+}
+
+/* /proc/<pid>/sched prints "se.sum_exec_runtime : <sec>.<usec>". Replace just
+ * the number, right-padded, so nothing downstream shifts. */
+static int cpu_visibility_rewrite_sched(struct cpu_vis_args *args, u64 ns)
+{
+    char tmp[40];
+    char *buf, *end, *line, *colon, *num;
+    size_t linelen;
+    int newlen;
+
+    if (!args->m || !args->m->buf || !args->m->count)
+        return 0;
+    buf = args->m->buf;
+    end = buf + args->m->count;
+
+    line = NULL;
+    for (char *q = buf; q + 19 < end; q++) {
+        if (q == buf || q[-1] == '\n') {
+            char *r = q;
+            while (r < end && *r == ' ')
+                r++;
+            if (r + 19 <= end && !strncmp(r, "se.sum_exec_runtime", 19)) {
+                line = r;
+                break;
+            }
+        }
+    }
+    if (!line)
+        return 0;
+
+    colon = memchr(line, ':', end - line);
+    if (!colon)
+        return 0;
+    num = colon + 1;
+    while (num < end && *num == ' ')
+        num++;
+    if (num >= end)
+        return 0;
+
+    linelen = 0;
+    while (num + linelen < end && num[linelen] != '\n')
+        linelen++;
+    if (linelen == 0)
+        return 0;
+
+    newlen = snprintf(tmp, sizeof(tmp), "%llu.%06llu",
+                      (unsigned long long)div_u64(ns, 1000000000ull),
+                      (unsigned long long)(div_u64(ns, 1000ull) % 1000000ull));
+    if (newlen <= 0 || (size_t)newlen > linelen)
+        return 0;
+
+    memcpy(num, tmp, newlen);
+    memset(num + newlen, ' ', linelen - newlen);
+    return 0;
+}
+
+static int cpu_vis_apply_schedstat_return(struct kretprobe_instance *instance,
+    struct pt_regs *regs)
+{
+    struct cpu_vis_args *args = (struct cpu_vis_args *)instance->data;
+    struct cpu_visibility_target *t = NULL;
+    unsigned long flags;
+    u64 ns;
+    int depth;
+
+    (void)regs;
+    if (!args || !READ_ONCE(cpu_visibility_active))
+        return 0;
+    if (!args->task || !args->m)
+        return 0;
+    if (!cpu_visibility_match(args->task, &t) || !t)
+        return 0;
+
+    depth = this_cpu_inc_return(cpu_visibility_depth);
+    if (depth > 1) {
+        this_cpu_dec(cpu_visibility_depth);
+        return 0;
+    }
+    if (spin_trylock_irqsave(&cpu_visibility_lock, flags)) {
+        cpu_visibility_accrue(t, ktime_get_mono_fast_ns());
+        ns = t->syn_ticks * (1000000000ull / CPU_VIS_HZ);
+        spin_unlock_irqrestore(&cpu_visibility_lock, flags);
+        cpu_visibility_rewrite_schedstat(args, ns);
+    }
+    this_cpu_dec(cpu_visibility_depth);
+    return 0;
+}
+
+static int cpu_vis_apply_sched_return(struct kretprobe_instance *instance,
+    struct pt_regs *regs)
+{
+    struct cpu_vis_args *args = (struct cpu_vis_args *)instance->data;
+    struct cpu_visibility_target *t = NULL;
+    unsigned long flags;
+    u64 ns;
+    int depth;
+
+    (void)regs;
+    if (!args || !READ_ONCE(cpu_visibility_active))
+        return 0;
+    if (!args->task || !args->m)
+        return 0;
+    if (!cpu_visibility_match(args->task, &t) || !t)
+        return 0;
+
+    depth = this_cpu_inc_return(cpu_visibility_depth);
+    if (depth > 1) {
+        this_cpu_dec(cpu_visibility_depth);
+        return 0;
+    }
+    if (spin_trylock_irqsave(&cpu_visibility_lock, flags)) {
+        cpu_visibility_accrue(t, ktime_get_mono_fast_ns());
+        ns = t->syn_ticks * (1000000000ull / CPU_VIS_HZ);
+        spin_unlock_irqrestore(&cpu_visibility_lock, flags);
+        cpu_visibility_rewrite_sched(args, ns);
+    }
+    this_cpu_dec(cpu_visibility_depth);
+    return 0;
+}
+
 static int cpu_vis_apply_return(struct kretprobe_instance *instance,
     struct pt_regs *regs)
 {
@@ -3145,8 +3328,37 @@ static int cpu_vis_thr_ret(struct kretprobe_instance *instance, struct pt_regs *
     return cpu_vis_apply_return(instance, regs);
 }
 
+static int cpu_vis_ss_entry(struct kretprobe_instance *instance, struct pt_regs *regs)
+{
+    return cpu_vis_capture_entry(instance, regs);
+}
+
+static int cpu_vis_ss_ret(struct kretprobe_instance *instance, struct pt_regs *regs)
+{
+    return cpu_vis_apply_schedstat_return(instance, regs);
+}
+
+/* Uses the task/ns/m ordering of proc_sched_show_task(). */
+static int cpu_vis_sched_entry(struct kretprobe_instance *instance, struct pt_regs *regs)
+{
+    return cpu_vis_capture_entry_sched(instance, regs);
+}
+
+static int cpu_vis_sched_ret(struct kretprobe_instance *instance, struct pt_regs *regs)
+{
+    return cpu_vis_apply_sched_return(instance, regs);
+}
+
 static void cpu_visibility_drop_hooks(void)
 {
+    if (cpu_vis_sched_hooked) {
+        unregister_kretprobe(&cpu_vis_sched_probe);
+        cpu_vis_sched_hooked = false;
+    }
+    if (cpu_vis_ss_hooked) {
+        unregister_kretprobe(&cpu_vis_ss_probe);
+        cpu_vis_ss_hooked = false;
+    }
     if (cpu_vis_thr_hooked) {
         unregister_kretprobe(&cpu_vis_thr_probe);
         cpu_vis_thr_hooked = false;
@@ -3184,6 +3396,31 @@ static int cpu_visibility_install_hooks(void)
         return ret;
     }
     cpu_vis_thr_hooked = true;
+
+    memset(&cpu_vis_ss_probe, 0, sizeof(cpu_vis_ss_probe));
+    cpu_vis_ss_probe.kp.symbol_name = "proc_pid_schedstat";
+    cpu_vis_ss_probe.entry_handler = cpu_vis_ss_entry;
+    cpu_vis_ss_probe.handler = cpu_vis_ss_ret;
+    cpu_vis_ss_probe.data_size = sizeof(struct cpu_vis_args);
+    cpu_vis_ss_probe.maxactive = max(num_possible_cpus() * 4, 64U);
+    ret = register_kretprobe(&cpu_vis_ss_probe);
+    if (ret)
+        nbd_warn("stage=cpu_visibility schedstat=unavailable error=%d\n", ret);
+    else
+        cpu_vis_ss_hooked = true;
+
+    memset(&cpu_vis_sched_probe, 0, sizeof(cpu_vis_sched_probe));
+    cpu_vis_sched_probe.kp.symbol_name = "proc_sched_show_task";
+    cpu_vis_sched_probe.entry_handler = cpu_vis_sched_entry;
+    cpu_vis_sched_probe.handler = cpu_vis_sched_ret;
+    cpu_vis_sched_probe.data_size = sizeof(struct cpu_vis_args);
+    cpu_vis_sched_probe.maxactive = max(num_possible_cpus() * 4, 64U);
+    ret = register_kretprobe(&cpu_vis_sched_probe);
+    if (ret)
+        nbd_warn("stage=cpu_visibility sched=unavailable error=%d\n", ret);
+    else
+        cpu_vis_sched_hooked = true;
+
     return 0;
 }
 
