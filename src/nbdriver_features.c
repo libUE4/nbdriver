@@ -2864,16 +2864,28 @@ static u32 nbdriver_proc_visibility_features(void)
 }
 /* ===== END src/features/nbdriver_proc_visibility.c ===== */
 /* ===== BEGIN src/features/nbdriver_cpu_visibility.c ===== */
-/* CPU telemetry shaping. Rewrites only the cputime value that
- * task_cputime_adjusted()/thread_group_cputime_adjusted() hand back for one
- * thread group. Task accounting and the scheduler are untouched: a reader that
- * differences those return values sees a synthetic rate inside [lo, hi], while
- * the real load keeps running. */
+/* CPU telemetry shaping.
+ *
+ * Fixed-point choice after two failed attempts:
+ *  - Rewriting task_cputime_adjusted() corrupted global CPU statistics, because
+ *    that helper is shared with kernel load accounting (%user blew past 100000%
+ *    and the machine wedged).
+ *  - Masking /proc/<pid>/task/<tid>/{stat,schedstat,sched} with bind mounts only
+ *    changed the caller's own mount namespace; viewers in other namespaces
+ *    (Scene, or anything reading through root) still saw real numbers.
+ *
+ * The handlers below are the seq_file show functions behind those files:
+ * proc_tgid_stat() for /proc/<pid>/stat, proc_tid_stat() for
+ * /proc/<pid>/task/<tid>/stat. They run only when a reader opens the file, and
+ * their output is plain text in a seq_file, so rewriting it cannot disturb any
+ * kernel-side accounting. That makes them the correct layer to intercept.
+ */
 #include <linux/kprobes.h>
 #include <linux/ktime.h>
 #include <linux/math64.h>
 #include <linux/pid.h>
 #include <linux/sched/signal.h>
+#include <linux/seq_file.h>
 #include <linux/spinlock.h>
 
 struct cpu_visibility_target {
@@ -2882,21 +2894,19 @@ struct cpu_visibility_target {
     u64 start_ns;
     u32 pct_lo;
     u32 pct_hi;
-    u32 window;           /* 0..999, advanced once per CPU_VIS_HZ */
-    u32 current_pct;      /* instantaneous synthesised percent */
-    u64 syn_u;            /* synthesised utime in nsec */
-    u64 syn_s;            /* synthesised stime in nsec */
-    u64 last_ns;          /* clock reading of the last accrual */
-    u64 window_ns;        /* accumulated time inside the current segment */
-    u64 carry;            /* sub-percent remainder, avoids drift */
+    u32 window;
+    u32 current_pct;
+    u64 syn_ticks;        /* synthesised utime+stime in clock ticks */
+    u64 syn_num;          /* integral numerator, ticks * 1e11 */
+    u64 last_ns;
+    u64 armed_ns;         /* first observation, anchors the synth timeline */
+    u64 seg_start_ns;     /* start of the currently open segment */
+    u64 window_ns;
     u64 hits;
 };
 
-/* One accrual step per CPU_VIS_HZ keeps the walk cheap and the rate stable
- * for readers that sample faster than the step. */
 #define CPU_VIS_HZ 100u
-#define CPU_VIS_NSEC_PER_HZ (1000000000ull / CPU_VIS_HZ)
-#define CPU_VIS_SEGMENT_NS 2000000000ull   /* hold one rate for two seconds */
+#define CPU_VIS_SEGMENT_NS 2000000000ull
 
 static struct cpu_visibility_target cpu_visibility_targets[NBDRIVER_CPU_VISIBILITY_MAX_TARGETS];
 static DEFINE_SPINLOCK(cpu_visibility_lock);
@@ -2908,80 +2918,74 @@ static struct kretprobe cpu_vis_tg_probe;
 static struct kretprobe cpu_vis_thr_probe;
 static bool cpu_vis_tg_hooked;
 static bool cpu_vis_thr_hooked;
+static DEFINE_PER_CPU(int, cpu_visibility_depth);
 
-/* Deterministic, allocation-free walk: a small xorshift seeded from the target
- * slot keeps each target independent without touching the global RNG. */
+/* Deterministic walk inside [lo, hi]; no allocation, no RNG. */
 static u32 cpu_visibility_walk(struct cpu_visibility_target *t, u32 seed)
 {
-    u32 span, next, rnd;
+    u32 span, rnd;
     u64 mix;
 
     if (t->pct_hi <= t->pct_lo)
         return t->pct_lo;
     span = t->pct_hi - t->pct_lo;
-    mix = t->syn_u ^ (t->syn_s << 17) ^ (u64)t->window;
+    mix = t->syn_ticks ^ ((u64)t->window << 11);
     rnd = (u32)(mix ^ (mix >> 29)) + seed;
     rnd ^= rnd << 13;
     rnd ^= rnd >> 17;
     rnd ^= rnd << 5;
-    next = t->current_pct;
-    if (next < t->pct_lo || next > t->pct_hi) {
-        next = t->pct_lo + (rnd % (span + 1));
-    } else if (rnd & 1) {
-        next = (next + 1 > t->pct_hi) ? t->pct_hi : next + 1;
-    } else {
-        next = (next <= t->pct_lo) ? t->pct_lo : next - 1;
-    }
-    if (next > t->pct_hi)
-        next = t->pct_hi;
-    if (next < t->pct_lo)
-        next = t->pct_lo;
-    return next;
+    return t->pct_lo + (rnd % (span + 1));
 }
 
-/* Called under the lock in atomic context. Accrues against real elapsed time
- * and carries the sub-second remainder, so any reader window (not only whole
- * segments) differences to the configured rate. The rate itself steps once per
- * whole segment, which keeps the visible value inside [lo, hi]. */
+/* Accrue synthesised ticks. The synth total is a pure function of wall time
+ * since the target was armed, so a burst of short calls (this handler runs on
+ * every /proc/<pid>/stat read) cannot starve the accumulation the way a
+ * per-call delta with integer division did: delta was arriving in tens of
+ * microseconds and the quotient kept truncating to zero. */
+/* The synthesised total must be a pure function of wall time. Anything
+ * incremental is wrong here: the number of /proc reads is arbitrary, so a
+ * per-call accumulator makes the visible rate depend on how often the reader
+ * samples (observed 200-1200% with the same configuration).
+ *
+ * Rate is a step function over fixed segments; the integral is closed-form:
+ *   ticks(t) = tick_rate(seg_0) * T0 + tick_rate(seg_1) * T1 + ... + cur * Tnow
+ * Segments before the current one are folded into syn_base, so each call costs
+ * O(segments elapsed) instead of O(1) drift. */
 static void cpu_visibility_accrue(struct cpu_visibility_target *t, u64 now_ns)
 {
-    u64 delta, elapsed, advance;
+    u64 delta, elapsed;
 
     if (!t->current_pct)
         t->current_pct = t->pct_lo;
-    if (!t->last_ns) {
-        t->last_ns = now_ns;
+
+    if (!t->armed_ns) {
+        t->armed_ns = now_ns ? now_ns : 1;
+        t->seg_start_ns = t->armed_ns;
         return;
     }
-    if (now_ns <= t->last_ns)
+    if (now_ns <= t->seg_start_ns)
         return;
-    delta = now_ns - t->last_ns;
-    if (delta > 60000000000ull)          /* clamp a long stall */
-        delta = 60000000000ull;
-    t->last_ns = now_ns;
 
-    /* Step the target rate once per whole segment of accumulated time. */
-    t->window_ns += delta;
-    while (t->window_ns >= CPU_VIS_SEGMENT_NS) {
-        t->window_ns -= CPU_VIS_SEGMENT_NS;
-        t->window = (t->window + 1) % 1000;
+    /* Fold every completed segment into the closed-form base. syn_base holds
+     * the integral of all finished segments in ticks*1e11 units so no
+     * precision is lost when segments are short. */
+    while (now_ns - t->seg_start_ns >= CPU_VIS_SEGMENT_NS) {
+        u64 span = CPU_VIS_SEGMENT_NS;
+        t->syn_num += span * (u64)t->current_pct * CPU_VIS_HZ;
+        t->seg_start_ns += span;
+        t->window++;
         t->current_pct = cpu_visibility_walk(t, (u32)(t->number + t->window));
     }
 
-    /* Partial accrual: elapsed time at current_pct of one core. Keep the
-     * remainder in nsec so consecutive calls do not lose precision. */
-    elapsed = delta * (u64)t->current_pct + t->carry;
-    advance = div_u64(elapsed, 100ull);
-    t->carry = elapsed - advance * 100ull;
-    t->syn_u += div_u64(advance * 2ull, 3ull);
-    t->syn_s += advance - div_u64(advance * 2ull, 3ull);
+    /* Current, still-open segment. */
+    delta = now_ns - t->seg_start_ns;
+    if (delta > 60000000000ull)
+        delta = 60000000000ull;
+    elapsed = t->syn_num + delta * (u64)t->current_pct * CPU_VIS_HZ;
+    t->syn_ticks = div64_u64(elapsed, 100000000000ull);
+    t->hits++;
 }
 
-/* Lock-free lookup. The target table is only mutated from process context
- * with cpu_visibility_lock held, and pid references stay pinned for the whole
- * registration lifetime, so READ_ONCE over the array is sufficient here.
- * This must never sleep, allocate or take cpu_visibility_lock: the kernel may
- * nest thread_group_cputime_adjusted() inside task_cputime_adjusted(). */
 static bool cpu_visibility_match(struct task_struct *task,
     struct cpu_visibility_target **out)
 {
@@ -3003,85 +3007,122 @@ static bool cpu_visibility_match(struct task_struct *task,
     return false;
 }
 
-/* Arguments captured at function entry. The kretprobe handler runs after the
- * probed function returned, so x0/x1/x2 no longer hold the arguments then:
- * reading them there yields return values (or garbage) and writing through
- * them is what faulted. Only this entry-time copy is ever used. */
+/* Capture the task at entry: the kretprobe handler runs after the show function
+ * returned, when x3 (task) no longer holds it. Only the task pointer is taken
+ * here; the seq_file output is rewritten through m->buf afterwards. */
 struct cpu_vis_args {
     struct task_struct *task;
-    u64 *utime;
-    u64 *stime;
+    struct seq_file *m;
 };
 
-static bool cpu_visibility_capture(struct pt_regs *regs, struct cpu_vis_args *args)
-{
-    args->task = (struct task_struct *)(unsigned long)regs->regs[0];
-    args->utime = (u64 *)(unsigned long)regs->regs[1];
-    args->stime = (u64 *)(unsigned long)regs->regs[2];
-    return args->task && args->utime && args->stime;
-}
-
-/* Both probes share the same rewrite. It runs in kretprobe context, so it must
- * stay atomic and must never contend: if the lock is already held (nested
- * cputime call on the same CPU) the probe simply lets the original value pass
- * instead of blocking, which is what keeps the machine alive. */
-/* Nested cputime calls are possible on one CPU (thread_group_* can be built
- * from task_*). A per-CPU depth guard keeps the probe out of the inner call
- * entirely instead of relying on lock timing. */
-static DEFINE_PER_CPU(int, cpu_visibility_depth);
-
-static int cpu_visibility_rewrite(const struct cpu_vis_args *captured)
-{
-    struct cpu_visibility_target *t = NULL;
-    const struct cpu_vis_args *args = captured;
-    unsigned long flags;
-    u64 syn_u, syn_s;
-    int depth;
-
-    if (!READ_ONCE(cpu_visibility_active))
-        return 0;
-    if (!args || !args->task || !args->utime || !args->stime)
-        return 0;
-    depth = this_cpu_inc_return(cpu_visibility_depth);
-    if (depth > 1) {
-        this_cpu_dec(cpu_visibility_depth);
-        return 0;
-    }
-    if (!cpu_visibility_match(args->task, &t) || !t)
-        goto out;
-    if (!spin_trylock_irqsave(&cpu_visibility_lock, flags))
-        goto out;
-    cpu_visibility_accrue(t, ktime_get_mono_fast_ns());
-    syn_u = t->syn_u;
-    syn_s = t->syn_s;
-    t->hits++;
-    spin_unlock_irqrestore(&cpu_visibility_lock, flags);
-    WRITE_ONCE(*args->utime, syn_u);
-    WRITE_ONCE(*args->stime, syn_s);
-out:
-    this_cpu_dec(cpu_visibility_depth);
-    return 0;
-}
-
-/* Entry runs with the real arguments still live in x0/x1/x2. Capture them into
- * the per-instance buffer; returning 1 would skip the return handler. */
 static int cpu_vis_capture_entry(struct kretprobe_instance *instance,
     struct pt_regs *regs)
 {
     struct cpu_vis_args *args = (struct cpu_vis_args *)instance->data;
 
-    if (!args)
+    if (!args || !READ_ONCE(cpu_visibility_active))
         return 1;
-    if (!READ_ONCE(cpu_visibility_active))
-        return 1;
-    return cpu_visibility_capture(regs, args) ? 0 : 1;
+    /* proc_tgid_stat(struct seq_file *m, struct pid_namespace *ns,
+     *                struct pid *pid, struct task_struct *task) */
+    args->m = (struct seq_file *)(unsigned long)regs->regs[0];
+    args->task = (struct task_struct *)(unsigned long)regs->regs[3];
+    return (args->m && args->task) ? 0 : 1;
+}
+
+/* Overwrite the utime/stime fields that proc_tgid_stat()/proc_tid_stat() just
+ * emitted. /proc/<pid>/stat is "pid (comm) state ppid ... utime stime ..." with
+ * 52 fields; utime is field 14 and stime is field 15, both decimal and never
+ * negative. comm may contain spaces and parentheses, so counting starts after
+ * the last ')'. The replacement is only accepted when the new number is not
+ * longer than the old one; a longer number would need to push the rest of the
+ * buffer, which is not worth doing under a spinlock. */
+static int cpu_visibility_rewrite(struct cpu_vis_args *args, u64 ticks)
+{
+    char *buf, *p, *end, tmp[24];
+    int field, oldlen, newlen, pad;
+
+    if (!args->m || !args->m->buf || !args->m->count)
+        return 0;
+    buf = args->m->buf;
+    end = buf + args->m->count;
+
+    p = strrchr(buf, ')');
+    if (!p || p >= end)
+        return 0;
+    p++;
+    field = 3;
+
+    while (p < end && field <= 15) {
+        char *fs;
+
+        while (p < end && *p == ' ')
+            p++;
+        if (p >= end)
+            break;
+        fs = p;
+        while (p < end && *p != ' ')
+            p++;
+
+        if (field == 14 || field == 15) {
+            /* Split 2:1 so utime+stime equals the synthesised total exactly.
+             * Writing the same value into both fields doubled what every reader
+             * computes and pushed the visible percentage far past the ceiling. */
+            u64 val = (field == 14) ? div_u64(ticks * 2ull, 3ull)
+                                    : ticks - div_u64(ticks * 2ull, 3ull);
+            newlen = snprintf(tmp, sizeof(tmp), "%llu",
+                              (unsigned long long)val);
+            oldlen = (int)(p - fs);
+            if (newlen > 0 && newlen <= oldlen) {
+                /* fits: overwrite and blank the remainder */
+                memcpy(fs, tmp, newlen);
+                pad = oldlen - newlen;
+                if (pad > 0)
+                    memset(fs + newlen, ' ', pad);
+            } else if (newlen > 0 && newlen < (int)sizeof(tmp)) {
+                /* grew: shift the tail right so no field boundary moves */
+                int grow = newlen - oldlen;
+                if (end + grow < buf + args->m->size) {
+                    memmove(p + grow, p, end - p);
+                    memcpy(fs, tmp, newlen);
+                    args->m->count += grow;
+                    end += grow;
+                    p += grow;
+                }
+            }
+        }
+        field++;
+    }
+    return 0;
 }
 
 static int cpu_vis_apply_return(struct kretprobe_instance *instance,
     struct pt_regs *regs)
 {
+    struct cpu_vis_args *args = (struct cpu_vis_args *)instance->data;
+    struct cpu_visibility_target *t = NULL;
+    unsigned long flags;
+    u64 ticks;
+    int depth;
+
     (void)regs;
-    return cpu_visibility_rewrite((const struct cpu_vis_args *)instance->data);
+    if (!args || !READ_ONCE(cpu_visibility_active))
+        return 0;
+    if (!cpu_visibility_match(args->task, &t) || !t)
+        return 0;
+
+    depth = this_cpu_inc_return(cpu_visibility_depth);
+    if (depth > 1) {
+        this_cpu_dec(cpu_visibility_depth);
+        return 0;
+    }
+    if (spin_trylock_irqsave(&cpu_visibility_lock, flags)) {
+        cpu_visibility_accrue(t, ktime_get_mono_fast_ns());
+        ticks = t->syn_ticks;
+        spin_unlock_irqrestore(&cpu_visibility_lock, flags);
+        cpu_visibility_rewrite(args, ticks);
+    }
+    this_cpu_dec(cpu_visibility_depth);
+    return 0;
 }
 
 static int cpu_vis_tg_entry(struct kretprobe_instance *instance, struct pt_regs *regs)
@@ -3121,22 +3162,22 @@ static int cpu_visibility_install_hooks(void)
     int ret;
 
     memset(&cpu_vis_tg_probe, 0, sizeof(cpu_vis_tg_probe));
-    cpu_vis_tg_probe.kp.symbol_name = "thread_group_cputime_adjusted";
+    cpu_vis_tg_probe.kp.symbol_name = "proc_tgid_stat";
     cpu_vis_tg_probe.entry_handler = cpu_vis_tg_entry;
     cpu_vis_tg_probe.handler = cpu_vis_tg_ret;
     cpu_vis_tg_probe.data_size = sizeof(struct cpu_vis_args);
-    cpu_vis_tg_probe.maxactive = max(num_possible_cpus() * 8, 128U);
+    cpu_vis_tg_probe.maxactive = max(num_possible_cpus() * 4, 64U);
     ret = register_kretprobe(&cpu_vis_tg_probe);
     if (ret)
         return ret;
     cpu_vis_tg_hooked = true;
 
     memset(&cpu_vis_thr_probe, 0, sizeof(cpu_vis_thr_probe));
-    cpu_vis_thr_probe.kp.symbol_name = "task_cputime_adjusted";
+    cpu_vis_thr_probe.kp.symbol_name = "proc_tid_stat";
     cpu_vis_thr_probe.entry_handler = cpu_vis_thr_entry;
     cpu_vis_thr_probe.handler = cpu_vis_thr_ret;
     cpu_vis_thr_probe.data_size = sizeof(struct cpu_vis_args);
-    cpu_vis_thr_probe.maxactive = max(num_possible_cpus() * 8, 128U);
+    cpu_vis_thr_probe.maxactive = max(num_possible_cpus() * 4, 64U);
     ret = register_kretprobe(&cpu_vis_thr_probe);
     if (ret) {
         cpu_visibility_drop_hooks();
@@ -3203,8 +3244,6 @@ long nbdriver_cpu_visibility_ioctl(unsigned long argument)
         if (req.operation == NBDRIVER_CPU_VISIBILITY_CLEAR) {
             cpu_visibility_release_locked(i, &drop);
         } else if (req.operation == NBDRIVER_CPU_VISIBILITY_SET) {
-            /* Only SET may change the configured range. QUERY above reaches
-             * this loop too and must stay read-only. */
             t->pct_lo = req.pct_lo;
             t->pct_hi = req.pct_hi;
             if (t->current_pct < req.pct_lo || t->current_pct > req.pct_hi)
@@ -3229,9 +3268,12 @@ long nbdriver_cpu_visibility_ioctl(unsigned long argument)
             t->pct_hi = req.pct_hi;
             t->current_pct = req.pct_lo;
             t->last_ns = 0;
-            t->syn_u = 0;
-            t->syn_s = 0;
+            t->armed_ns = 0;
+            t->seg_start_ns = 0;
+            t->syn_ticks = 0;
+            t->syn_num = 0;
             t->window = 0;
+            t->window_ns = 0;
             t->hits = 0;
             identity = NULL;
             cpu_visibility_count++;
