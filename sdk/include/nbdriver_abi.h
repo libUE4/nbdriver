@@ -508,4 +508,37 @@ struct nbdriver_udp_read_request {
 #define NBDRIVER_IOC_UDP_STATUS \
     _IOR(NBDRIVER_IOC_MAGIC, 0x28, struct nbdriver_udp_status)
 
+/* CPU telemetry shaping, additive ABI 5. Rewrites the cputime values returned
+ * by task_cputime_adjusted/thread_group_cputime_adjusted for one thread group,
+ * so readers (top/ps/dumpsys) derive a bounded range instead of the real load.
+ * Real accounting and scheduling are untouched; only an exit value is replaced. */
+#define NBDRIVER_FEATURE_CPU_VISIBILITY (1U << 24)
+#define NBDRIVER_CPU_VISIBILITY_QUERY 0U
+#define NBDRIVER_CPU_VISIBILITY_SET   1U
+#define NBDRIVER_CPU_VISIBILITY_CLEAR 2U
+#define NBDRIVER_CPU_VISIBILITY_MAX_TARGETS 32U
+/* Percent bounds are inclusive and applied per one-second slice; the composed
+ * rate walks between them, so a differential reader stays inside the window. */
+#define NBDRIVER_CPU_VISIBILITY_PCT_MIN 1U
+#define NBDRIVER_CPU_VISIBILITY_PCT_MAX 100U
+
+struct nbdriver_cpu_visibility_request {
+    nbdriver_s32 pid;
+    nbdriver_u32 operation;
+    nbdriver_u64 expected_start_ns;
+    nbdriver_u32 pct_lo;   /* SET: inclusive lower bound, 1..100 */
+    nbdriver_u32 pct_hi;   /* SET: inclusive upper bound, >= lo */
+    nbdriver_u32 active;   /* reply: shaping hooks are installed */
+    nbdriver_u32 target_count;
+    nbdriver_u32 current_pct; /* reply: instantaneous synthesised percent */
+    nbdriver_u32 hits;     /* reply: values replaced so far */
+    nbdriver_s32 error;
+    nbdriver_u32 reserved;
+    nbdriver_u64 missed;   /* REPLY: kretprobe missed counters */
+    nbdriver_u64 sample_ns;
+};
+
+#define NBDRIVER_IOC_CPU_VISIBILITY \
+    _IOWR(NBDRIVER_IOC_MAGIC, 0x29, struct nbdriver_cpu_visibility_request)
+
 #endif /* NBDRIVER_ABI_H */

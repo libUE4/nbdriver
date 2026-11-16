@@ -516,6 +516,34 @@ struct nbdriver_udp_read_request {
 #define NBDRIVER_IOC_UDP_STATUS \
     _IOR(NBDRIVER_IOC_MAGIC, 0x28, struct nbdriver_udp_status)
 
+/* CPU telemetry shaping, additive ABI 5. Mirrors nbdriver_abi.h. */
+#define NBDRIVER_FEATURE_CPU_VISIBILITY (1U << 24)
+#define NBDRIVER_CPU_VISIBILITY_QUERY 0U
+#define NBDRIVER_CPU_VISIBILITY_SET   1U
+#define NBDRIVER_CPU_VISIBILITY_CLEAR 2U
+#define NBDRIVER_CPU_VISIBILITY_MAX_TARGETS 32U
+#define NBDRIVER_CPU_VISIBILITY_PCT_MIN 1U
+#define NBDRIVER_CPU_VISIBILITY_PCT_MAX 100U
+
+struct nbdriver_cpu_visibility_request {
+    nbdriver_s32 pid;
+    nbdriver_u32 operation;
+    nbdriver_u64 expected_start_ns;
+    nbdriver_u32 pct_lo;
+    nbdriver_u32 pct_hi;
+    nbdriver_u32 active;
+    nbdriver_u32 target_count;
+    nbdriver_u32 current_pct;
+    nbdriver_u32 hits;
+    nbdriver_s32 error;
+    nbdriver_u32 reserved;
+    nbdriver_u64 missed;
+    nbdriver_u64 sample_ns;
+};
+
+#define NBDRIVER_IOC_CPU_VISIBILITY \
+    _IOWR(NBDRIVER_IOC_MAGIC, 0x29, struct nbdriver_cpu_visibility_request)
+
 #endif /* NBDRIVER_ABI_H */
 
 #ifdef __cplusplus
@@ -1150,6 +1178,47 @@ static inline int nbdriver_udp_capture_stop(int fd)
 {
     if (fd < 0) { errno = EINVAL; return -1; }
     return ioctl(fd, NBDRIVER_IOC_UDP_STOP, 0);
+}
+
+/* CPU telemetry shaping. The driver validates identity, bounds and the caller's
+ * CAP_SYS_PTRACE. QUERY with pid 0 reports global state; CLEAR removes one pid. */
+static inline int nbdriver_cpu_visibility(int fd, int pid, nbdriver_u32 operation,
+    nbdriver_u64 expected_start_ns, nbdriver_u32 pct_lo, nbdriver_u32 pct_hi,
+    struct nbdriver_cpu_visibility_request *out)
+{
+    if (!out) { errno = EINVAL; return -1; }
+    memset(out, 0, sizeof(*out));
+    if (fd < 0 || pid < 0 || operation > NBDRIVER_CPU_VISIBILITY_CLEAR ||
+        (!pid && operation != NBDRIVER_CPU_VISIBILITY_QUERY)) {
+        errno = EINVAL; return -1;
+    }
+    if (operation == NBDRIVER_CPU_VISIBILITY_SET &&
+        (pct_lo < NBDRIVER_CPU_VISIBILITY_PCT_MIN ||
+         pct_hi > NBDRIVER_CPU_VISIBILITY_PCT_MAX || pct_lo > pct_hi)) {
+        errno = EINVAL; return -1;
+    }
+    out->pid = pid;
+    out->operation = operation;
+    out->expected_start_ns = expected_start_ns;
+    out->pct_lo = pct_lo;
+    out->pct_hi = pct_hi;
+    return ioctl(fd, NBDRIVER_IOC_CPU_VISIBILITY, out);
+}
+
+/* Clamp the visible CPU rate of one thread group into [pct_lo, pct_hi]. */
+static inline int nbdriver_set_cpu_range(int fd, int pid, nbdriver_u32 pct_lo,
+    nbdriver_u32 pct_hi)
+{
+    struct nbdriver_cpu_visibility_request out;
+    return nbdriver_cpu_visibility(fd, pid, NBDRIVER_CPU_VISIBILITY_SET, 0,
+        pct_lo, pct_hi, &out);
+}
+
+static inline int nbdriver_clear_cpu_range(int fd, int pid)
+{
+    struct nbdriver_cpu_visibility_request out;
+    return nbdriver_cpu_visibility(fd, pid, NBDRIVER_CPU_VISIBILITY_CLEAR, 0,
+        0, 0, &out);
 }
 
 #ifdef __cplusplus

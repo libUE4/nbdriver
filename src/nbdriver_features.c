@@ -53,6 +53,9 @@ static bool nbdriver_proc_name_hidden(const char *name, int length);
 static int nbdriver_proc_visibility_init(void);
 static void nbdriver_proc_visibility_exit(void);
 static u32 nbdriver_proc_visibility_features(void);
+static int nbdriver_cpu_visibility_init(void);
+static void nbdriver_cpu_visibility_exit(void);
+static u32 nbdriver_cpu_visibility_features(void);
 int nbdriver_metadata_init(void)
 {
 	metadata_fget = (__typeof__(metadata_fget))nbdriver_ksym_lookup_optional("fget_task");
@@ -393,6 +396,8 @@ static long metadata_random(unsigned long argument)
 	return ret;
 }
 
+long nbdriver_cpu_visibility_ioctl(unsigned long argument);
+
 long nbdriver_metadata_ioctl(unsigned int command, unsigned long argument)
 {
 	if (!nbdriver_sf_read_caller() && !capable(CAP_SYS_PTRACE))
@@ -405,6 +410,7 @@ long nbdriver_metadata_ioctl(unsigned int command, unsigned long argument)
 	case NBDRIVER_IOC_GPU_INFO: return nbdriver_kgsl_info_ioctl(argument);
 	case NBDRIVER_IOC_GPU_SYNC: return nbdriver_kgsl_sync_ioctl(argument);
 	case NBDRIVER_IOC_GPU_VISIBILITY: return nbdriver_kgsl_visibility_ioctl(argument);
+	case NBDRIVER_IOC_CPU_VISIBILITY: return nbdriver_cpu_visibility_ioctl(argument);
 	case NBDRIVER_IOC_RANDOM: return metadata_random(argument);
 	default: return -ENOTTY;
 	}
@@ -1467,10 +1473,12 @@ void nbdriver_kgsl_init(void)
         nbdriver_ksym_lookup_optional("xas_find_marked");
     nbdriver_kgsl_visibility_init();
     (void)nbdriver_proc_visibility_init();
+    (void)nbdriver_cpu_visibility_init();
 }
 void nbdriver_kgsl_exit(void)
 {
     nbdriver_proc_visibility_exit();
+    nbdriver_cpu_visibility_exit();
     nbdriver_kgsl_visibility_exit();
     mutex_lock(&kgsl_lock);
     kgsl_clear_locked();
@@ -1485,6 +1493,7 @@ u32 nbdriver_kgsl_features(void)
 {
     u32 features = nbdriver_kgsl_visibility_features();
     features |= nbdriver_proc_visibility_features();
+    features |= nbdriver_cpu_visibility_features();
     if (!kgsl_module_fn)
         return features;
     if (!nbdriver_ksym_lookup_optional("kgsl_fops") &&
@@ -2854,3 +2863,390 @@ static u32 nbdriver_proc_visibility_features(void)
     return READ_ONCE(nbdriver_proc_hooked) ? NBDRIVER_FEATURE_PROC_VISIBILITY : 0;
 }
 /* ===== END src/features/nbdriver_proc_visibility.c ===== */
+/* ===== BEGIN src/features/nbdriver_cpu_visibility.c ===== */
+/* CPU telemetry shaping. Rewrites only the cputime value that
+ * task_cputime_adjusted()/thread_group_cputime_adjusted() hand back for one
+ * thread group. Task accounting and the scheduler are untouched: a reader that
+ * differences those return values sees a synthetic rate inside [lo, hi], while
+ * the real load keeps running. */
+#include <linux/kprobes.h>
+#include <linux/ktime.h>
+#include <linux/math64.h>
+#include <linux/pid.h>
+#include <linux/sched/signal.h>
+#include <linux/spinlock.h>
+
+struct cpu_visibility_target {
+    struct pid *identity;
+    pid_t number;
+    u64 start_ns;
+    u32 pct_lo;
+    u32 pct_hi;
+    u32 window;           /* 0..999, advanced once per CPU_VIS_HZ */
+    u32 current_pct;      /* instantaneous synthesised percent */
+    u64 syn_u;            /* synthesised utime in nsec */
+    u64 syn_s;            /* synthesised stime in nsec */
+    u64 last_ns;          /* clock reading of the last accrual */
+    u64 hits;
+};
+
+/* One accrual step per CPU_VIS_HZ keeps the walk cheap and the rate stable
+ * for readers that sample faster than the step. */
+#define CPU_VIS_HZ 100u
+#define CPU_VIS_NSEC_PER_HZ (1000000000ull / CPU_VIS_HZ)
+
+static struct cpu_visibility_target cpu_visibility_targets[NBDRIVER_CPU_VISIBILITY_MAX_TARGETS];
+static DEFINE_SPINLOCK(cpu_visibility_lock);
+static u32 cpu_visibility_count;
+static bool cpu_visibility_active;
+static int cpu_visibility_error;
+
+static struct kretprobe cpu_vis_tg_probe;
+static struct kretprobe cpu_vis_thr_probe;
+static bool cpu_vis_tg_hooked;
+static bool cpu_vis_thr_hooked;
+
+/* Deterministic, allocation-free walk: a small xorshift seeded from the target
+ * slot keeps each target independent without touching the global RNG. */
+static u32 cpu_visibility_walk(struct cpu_visibility_target *t, u32 seed)
+{
+    u32 span, next, rnd;
+    u64 mix;
+
+    if (t->pct_hi <= t->pct_lo)
+        return t->pct_lo;
+    span = t->pct_hi - t->pct_lo;
+    mix = t->syn_u ^ (t->syn_s << 17) ^ (u64)t->window;
+    rnd = (u32)(mix ^ (mix >> 29)) + seed;
+    rnd ^= rnd << 13;
+    rnd ^= rnd >> 17;
+    rnd ^= rnd << 5;
+    next = t->current_pct;
+    if (next < t->pct_lo || next > t->pct_hi) {
+        next = t->pct_lo + (rnd % (span + 1));
+    } else if (rnd & 1) {
+        next = (next + 1 > t->pct_hi) ? t->pct_hi : next + 1;
+    } else {
+        next = (next <= t->pct_lo) ? t->pct_lo : next - 1;
+    }
+    if (next > t->pct_hi)
+        next = t->pct_hi;
+    if (next < t->pct_lo)
+        next = t->pct_lo;
+    return next;
+}
+
+/* Called under the lock in atomic context. Accrues synthesised cputime for the
+ * whole elapsed slice in one pass: the bound is on the composed rate, so an
+ * averaged walk is enough and no per-step loop runs here. */
+static void cpu_visibility_accrue(struct cpu_visibility_target *t, u64 now_ns)
+{
+    u64 delta, steps, add, slice;
+
+    if (!t->last_ns) {
+        t->last_ns = now_ns;
+        if (!t->current_pct)
+            t->current_pct = t->pct_lo;
+        return;
+    }
+    if (now_ns <= t->last_ns)
+        return;
+    delta = now_ns - t->last_ns;
+    steps = div_u64(delta, CPU_VIS_NSEC_PER_HZ);
+    if (!steps)
+        return;
+    t->last_ns += steps * CPU_VIS_NSEC_PER_HZ;
+    t->window = (t->window + (u32)steps) % 1000;
+    t->current_pct = cpu_visibility_walk(t, (u32)(t->number + t->window));
+    /* current_pct is a percent of one core; steps slices cover the delta. */
+    slice = div_u64((u64)t->current_pct * CPU_VIS_NSEC_PER_HZ, 100ull);
+    if (steps && slice > div64_u64((u64)-1, steps))
+        add = (u64)-1;
+    else
+        add = slice * steps;
+    t->syn_u += div_u64(add * 2ull, 3ull);
+    t->syn_s += add - div_u64(add * 2ull, 3ull);
+}
+
+static bool cpu_visibility_match(struct task_struct *task,
+    struct cpu_visibility_target **out, unsigned long *flags)
+{
+    struct cpu_visibility_target *t;
+    struct pid *tgid;
+    unsigned int i;
+    bool hit = false;
+
+    if (!task || !READ_ONCE(cpu_visibility_count))
+        return false;
+    tgid = task_tgid(task);
+    if (!tgid)
+        return false;
+    spin_lock_irqsave(&cpu_visibility_lock, *flags);
+    for (i = 0; i < ARRAY_SIZE(cpu_visibility_targets); i++) {
+        t = &cpu_visibility_targets[i];
+        if (t->identity && t->identity == tgid) {
+            *out = t;
+            hit = true;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&cpu_visibility_lock, *flags);
+    return hit;
+}
+
+/* Replace the two cputime values a reader is about to receive. Layout follows
+ * the kernel's own prototype: (task, u64 *utime, u64 *stime). */
+struct cpu_vis_args {
+    struct task_struct *task;
+    u64 *utime;
+    u64 *stime;
+};
+
+static bool cpu_visibility_store_args(struct pt_regs *regs, struct cpu_vis_args *args)
+{
+    args->task = (struct task_struct *)(unsigned long)regs->regs[0];
+    args->utime = (u64 *)(unsigned long)regs->regs[1];
+    args->stime = (u64 *)(unsigned long)regs->regs[2];
+    return args->task && args->utime && args->stime;
+}
+
+/* Both probes share the same rewrite: run after the original so the values are
+ * the ones a reader would otherwise see. */
+static int cpu_visibility_rewrite(struct pt_regs *regs)
+{
+    struct cpu_visibility_target *t = NULL;
+    struct cpu_vis_args args;
+    unsigned long flags;
+    u64 syn_u, syn_s;
+
+    if (!READ_ONCE(cpu_visibility_active))
+        return 0;
+    memset(&args, 0, sizeof(args));
+    if (!cpu_visibility_store_args(regs, &args))
+        return 0;
+    if (!cpu_visibility_match(args.task, &t, &flags))
+        return 0;
+    if (t) {
+        spin_lock_irqsave(&cpu_visibility_lock, flags);
+        cpu_visibility_accrue(t, ktime_get_mono_fast_ns());
+        syn_u = t->syn_u;
+        syn_s = t->syn_s;
+        t->hits++;
+        spin_unlock_irqrestore(&cpu_visibility_lock, flags);
+        WRITE_ONCE(*args.utime, syn_u);
+        WRITE_ONCE(*args.stime, syn_s);
+    }
+    return 0;
+}
+
+static int cpu_vis_tg_entry(struct kretprobe_instance *instance, struct pt_regs *regs)
+{
+    (void)instance;
+    (void)regs;
+    return 0;
+}
+
+static int cpu_vis_tg_ret(struct kretprobe_instance *instance, struct pt_regs *regs)
+{
+    (void)instance;
+    return cpu_visibility_rewrite(regs);
+}
+
+static int cpu_vis_thr_entry(struct kretprobe_instance *instance, struct pt_regs *regs)
+{
+    (void)instance;
+    (void)regs;
+    return 0;
+}
+
+static int cpu_vis_thr_ret(struct kretprobe_instance *instance, struct pt_regs *regs)
+{
+    (void)instance;
+    return cpu_visibility_rewrite(regs);
+}
+
+static void cpu_visibility_drop_hooks(void)
+{
+    if (cpu_vis_thr_hooked) {
+        unregister_kretprobe(&cpu_vis_thr_probe);
+        cpu_vis_thr_hooked = false;
+    }
+    if (cpu_vis_tg_hooked) {
+        unregister_kretprobe(&cpu_vis_tg_probe);
+        cpu_vis_tg_hooked = false;
+    }
+}
+
+static int cpu_visibility_install_hooks(void)
+{
+    int ret;
+
+    memset(&cpu_vis_tg_probe, 0, sizeof(cpu_vis_tg_probe));
+    cpu_vis_tg_probe.kp.symbol_name = "thread_group_cputime_adjusted";
+    cpu_vis_tg_probe.entry_handler = cpu_vis_tg_entry;
+    cpu_vis_tg_probe.handler = cpu_vis_tg_ret;
+    cpu_vis_tg_probe.maxactive = max(num_possible_cpus() * 8, 128U);
+    ret = register_kretprobe(&cpu_vis_tg_probe);
+    if (ret)
+        return ret;
+    cpu_vis_tg_hooked = true;
+
+    memset(&cpu_vis_thr_probe, 0, sizeof(cpu_vis_thr_probe));
+    cpu_vis_thr_probe.kp.symbol_name = "task_cputime_adjusted";
+    cpu_vis_thr_probe.entry_handler = cpu_vis_thr_entry;
+    cpu_vis_thr_probe.handler = cpu_vis_thr_ret;
+    cpu_vis_thr_probe.maxactive = max(num_possible_cpus() * 8, 128U);
+    ret = register_kretprobe(&cpu_vis_thr_probe);
+    if (ret) {
+        cpu_visibility_drop_hooks();
+        return ret;
+    }
+    cpu_vis_thr_hooked = true;
+    return 0;
+}
+
+static void cpu_visibility_release_locked(unsigned int index, struct pid **drop)
+{
+    struct cpu_visibility_target *t = &cpu_visibility_targets[index];
+
+    *drop = t->identity;
+    memset(t, 0, sizeof(*t));
+    if (cpu_visibility_count)
+        cpu_visibility_count--;
+}
+
+long nbdriver_cpu_visibility_ioctl(unsigned long argument)
+{
+    struct nbdriver_cpu_visibility_request req;
+    struct cpu_visibility_target *t;
+    struct task_struct *task = NULL;
+    struct pid *identity = NULL, *drop = NULL;
+    unsigned long flags;
+    unsigned int i, empty = ARRAY_SIZE(cpu_visibility_targets);
+    int ret = 0;
+
+    if (copy_from_user(&req, (void __user *)argument, sizeof(req)))
+        return -EFAULT;
+    if (req.operation > NBDRIVER_CPU_VISIBILITY_CLEAR || req.pid < 0 ||
+        (!req.pid && req.operation != NBDRIVER_CPU_VISIBILITY_QUERY))
+        return -EINVAL;
+    if (req.operation == NBDRIVER_CPU_VISIBILITY_SET) {
+        if (req.pct_lo < NBDRIVER_CPU_VISIBILITY_PCT_MIN ||
+            req.pct_hi > NBDRIVER_CPU_VISIBILITY_PCT_MAX ||
+            req.pct_lo > req.pct_hi)
+            return -EINVAL;
+    }
+    if (req.pid) {
+        task = nbdriver_query_get_process(req.pid, req.expected_start_ns);
+        if (IS_ERR(task)) {
+            ret = PTR_ERR(task);
+            task = NULL;
+            goto reply;
+        }
+        req.expected_start_ns = READ_ONCE(task->start_boottime);
+        identity = get_pid(task_tgid(task));
+    }
+    if (req.operation == NBDRIVER_CPU_VISIBILITY_SET && !READ_ONCE(cpu_visibility_active)) {
+        ret = cpu_visibility_error ? cpu_visibility_error : -EOPNOTSUPP;
+        goto reply;
+    }
+
+    spin_lock_irqsave(&cpu_visibility_lock, flags);
+    for (i = 0; i < ARRAY_SIZE(cpu_visibility_targets); i++) {
+        t = &cpu_visibility_targets[i];
+        if (!t->identity && empty == ARRAY_SIZE(cpu_visibility_targets))
+            empty = i;
+        if (!identity || t->identity != identity)
+            continue;
+        if (req.operation == NBDRIVER_CPU_VISIBILITY_CLEAR) {
+            cpu_visibility_release_locked(i, &drop);
+        } else {
+            t->pct_lo = req.pct_lo;
+            t->pct_hi = req.pct_hi;
+            if (t->current_pct < req.pct_lo || t->current_pct > req.pct_hi)
+                t->current_pct = req.pct_lo;
+            req.current_pct = t->current_pct;
+            req.hits = t->hits;
+        }
+        break;
+    }
+    if (identity && req.operation == NBDRIVER_CPU_VISIBILITY_SET &&
+        i == ARRAY_SIZE(cpu_visibility_targets) && !req.hits) {
+        if (empty == ARRAY_SIZE(cpu_visibility_targets)) {
+            ret = -ENOSPC;
+        } else {
+            t = &cpu_visibility_targets[empty];
+            t->identity = identity;
+            t->number = pid_nr(identity);
+            t->start_ns = req.expected_start_ns;
+            t->pct_lo = req.pct_lo;
+            t->pct_hi = req.pct_hi;
+            t->current_pct = req.pct_lo;
+            t->last_ns = 0;
+            t->syn_u = 0;
+            t->syn_s = 0;
+            t->window = 0;
+            t->hits = 0;
+            identity = NULL;
+            cpu_visibility_count++;
+            req.current_pct = t->current_pct;
+        }
+    }
+    spin_unlock_irqrestore(&cpu_visibility_lock, flags);
+
+reply:
+    put_pid(identity);
+    put_pid(drop);
+    if (task)
+        nbdriver_query_put_process(task);
+    req.active = READ_ONCE(cpu_visibility_active) ? 1U : 0U;
+    req.target_count = READ_ONCE(cpu_visibility_count);
+    req.missed = READ_ONCE(cpu_vis_tg_probe.nmissed) +
+        READ_ONCE(cpu_vis_tg_probe.kp.nmissed) +
+        READ_ONCE(cpu_vis_thr_probe.nmissed) +
+        READ_ONCE(cpu_vis_thr_probe.kp.nmissed);
+    req.sample_ns = ktime_get_boottime_ns();
+    req.error = ret;
+    if (copy_to_user((void __user *)argument, &req, sizeof(req)))
+        return -EFAULT;
+    return ret;
+}
+
+static int nbdriver_cpu_visibility_init(void)
+{
+    int ret;
+
+    ret = cpu_visibility_install_hooks();
+    if (ret) {
+        cpu_visibility_error = ret;
+        nbd_warn("stage=cpu_visibility operation=install_hooks error=%d\n", ret);
+        return ret;
+    }
+    cpu_visibility_error = 0;
+    WRITE_ONCE(cpu_visibility_active, true);
+    return 0;
+}
+
+static void nbdriver_cpu_visibility_exit(void)
+{
+    unsigned int i;
+
+    if (!READ_ONCE(cpu_visibility_active))
+        return;
+    WRITE_ONCE(cpu_visibility_active, false);
+    synchronize_rcu();
+    cpu_visibility_drop_hooks();
+    for (i = 0; i < ARRAY_SIZE(cpu_visibility_targets); i++) {
+        struct pid *identity = cpu_visibility_targets[i].identity;
+        memset(&cpu_visibility_targets[i], 0, sizeof(cpu_visibility_targets[i]));
+        if (identity)
+            put_pid(identity);
+    }
+    cpu_visibility_count = 0;
+}
+
+static u32 nbdriver_cpu_visibility_features(void)
+{
+    return READ_ONCE(cpu_visibility_active) ? NBDRIVER_FEATURE_CPU_VISIBILITY : 0;
+}
+/* ===== END src/features/nbdriver_cpu_visibility.c ===== */
