@@ -44,6 +44,9 @@ jobs:
       - name: Check loader build
         run: make loader SMOKE_CC=cc
 
+      - name: Check loader build with Clang
+        run: make loader SMOKE_CC=clang LOADER_OUTPUT=out/nbdriver-loader-clang
+
       - name: Check device smoke build
         run: |
           set -euo pipefail

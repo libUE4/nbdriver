@@ -55,11 +55,11 @@ static int read_whole(const char *path, unsigned char **out, size_t *size)
 		if (n < 0) {
 			int error = errno;
 
-			if (errno == EINTR)
+			if (error == EINTR)
 				continue;
 			free(buf);
 			close(fd);
-			return -error;
+			return error > 0 ? -error : -EIO;
 		}
 		if (n == 0)
 			break;
