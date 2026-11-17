@@ -50,6 +50,9 @@ jobs:
       - name: Check ELF rewrite regressions
         run: CLANG=clang python3 tests/nbdriver_patch_test.py
 
+      - name: Check file-lock header and iterator compatibility
+        run: python3 tests/filelock_compat_test.py
+
       - name: Check device smoke build
         run: |
           set -euo pipefail

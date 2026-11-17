@@ -2899,7 +2899,7 @@ static u32 nbdriver_proc_visibility_features(void)
 }
 /* ===== END src/features/nbdriver_proc_visibility.c ===== */
 /* ===== BEGIN src/features/nbdriver_pid_table_visibility.c ===== */
-#include <linux/filelock.h>
+#include "nbdriver_filelock.h"
 #include <linux/kprobes.h>
 #include <linux/seq_file.h>
 /* The /proc hook above hides the directory entry, but the pid stays named in
@@ -2974,22 +2974,19 @@ static int NBDRIVER_NO_CFI nbdriver_cgroup_procs_pre(struct kprobe *probe, struc
     return nbdriver_pid_table_skip(regs, 1);
 }
 
-/* int locks_show(struct seq_file *f, void *v), v is the struct file_lock.
- * fl_pid holds the owner pid in the initial namespace, which is the namespace
- * this driver's targets are recorded in. Offsets come from the kernel headers
- * this module is built against; a layout mismatch can only fail to match a
- * target, never suppress an unrelated row. */
+/* int locks_show(struct seq_file *f, void *v): v is fl_link/flc_link.
+ * Resolve its container using the exact headers for the target kernel.
+ * The owner pid is recorded in the initial namespace. */
 static int NBDRIVER_NO_CFI nbdriver_locks_show_pre(struct kprobe *probe, struct pt_regs *regs)
 {
     const void *lock = (const void *)(unsigned long)regs->regs[1];
-    unsigned int owner;
+    pid_t owner;
 
     (void)probe;
     if (!lock || !READ_ONCE(gpu_visibility_count))
         return 0;
-    owner = *(const unsigned int *)((const char *)lock +
-                                    offsetof(struct file_lock, fl_pid));
-    if (!nbdriver_pid_table_hidden((pid_t)owner))
+    owner = nbdriver_filelock_owner(lock);
+    if (!nbdriver_pid_table_hidden(owner))
         return 0;
     return nbdriver_pid_table_skip(regs, 0);
 }
