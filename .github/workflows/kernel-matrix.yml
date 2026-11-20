@@ -50,6 +50,9 @@ jobs:
       - name: Check ELF rewrite regressions
         run: CLANG=clang python3 tests/nbdriver_patch_test.py
 
+      - name: Check production ioctl metadata dispatch
+        run: python3 tests/metadata_dispatch_test.py
+
       - name: Check file-lock header and iterator compatibility
         run: python3 tests/filelock_compat_test.py
 

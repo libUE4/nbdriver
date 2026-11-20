@@ -189,6 +189,7 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 	case NBDRIVER_IOC_GPU_VISIBILITY:
 	case NBDRIVER_IOC_GPU_INFO:
 	case NBDRIVER_IOC_RANDOM:
+		return nbdriver_metadata_ioctl(command, argument);
 	case NBDRIVER_IOC_DEVPTS_STATUS:
 		return nbdriver_devpts_status_ioctl(argument);
 	case NBDRIVER_IOC_FIND_PROCESS:
