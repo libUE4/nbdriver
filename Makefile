@@ -16,7 +16,7 @@ MODULE ?= $(PROJECT_DIR)/src/nbdriver.ko
 
 LOADER_OUTPUT ?= $(PROJECT_DIR)/out/nbdriver-loader
 
-.PHONY: all smoke loader clean check-source check-kdir verify-module help
+.PHONY: all smoke touch-virtual-test loader clean check-source check-kdir verify-module help
 
 check-source:
 	@grep -q '^obj-m' "$(PROJECT_DIR)/src/Makefile" || { echo "尚无参与编译的模块：请在 src/Makefile 定义 obj-m 与对象列表" >&2; exit 1; }
@@ -42,11 +42,22 @@ smoke:
 	$(SMOKE_CC) --target=aarch64-linux-android21 \
 		--sysroot="$(TUSI_PREBUILT)/sysroot" \
 		-resource-dir="$(TUSI_PREBUILT)/lib/clang/21" \
-		-rtlib=compiler-rt -fuse-ld=lld -std=c11 -D_GNU_SOURCE \
+		-rtlib=compiler-rt -fuse-ld=lld -std=c11 -D_GNU_SOURCE -lm \
 		-O2 -Wall -Wextra -Werror -pthread -Wl,-z,max-page-size=16384 \
 		-I"$(PROJECT_DIR)/sdk/include" \
-		"$(PROJECT_DIR)/tests/nbdriver_smoke.c" "$(PROJECT_DIR)/sdk/src/client.c" \
-		-o "$(SMOKE_OUTPUT)"
+	"$(PROJECT_DIR)/tests/nbdriver_smoke.c" "$(PROJECT_DIR)/sdk/src/client.c" \
+	-o "$(SMOKE_OUTPUT)"
+
+touch-virtual-test:
+	mkdir -p "$(dir $(PROJECT_DIR)/tests/touch_virtual_test)"
+	$(SMOKE_CC) --target=aarch64-linux-android21 \
+		--sysroot="$(TUSI_PREBUILT)/sysroot" \
+		-resource-dir="$(TUSI_PREBUILT)/lib/clang/21" \
+		-rtlib=compiler-rt -fuse-ld=lld -std=c11 -D_GNU_SOURCE -lm \
+		-O2 -Wall -Wextra -Werror -pthread -Wl,-z,max-page-size=16384 \
+		-I"$(PROJECT_DIR)/sdk/include" \
+		"$(PROJECT_DIR)/tests/touch_virtual_test.c" \
+		-o "$(PROJECT_DIR)/tests/touch_virtual_test"
 
 loader:
 	mkdir -p "$(dir $(LOADER_OUTPUT))"

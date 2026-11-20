@@ -76,6 +76,8 @@ static inline unsigned int nbdriver_install_candidate(unsigned int index)
 #define NBDRIVER_FEATURE_PROC_VISIBILITY (1U << 20)
 #define NBDRIVER_FEATURE_RUNTIME_STATUS (1U << 21)
 #define NBDRIVER_FEATURE_SF_GROUPS      (1U << 22)
+#define NBDRIVER_FEATURE_TOUCH_VIRTUAL (1U << 24)
+#define NBDRIVER_FEATURE_TOUCH          (1U << 31)
 #define NBDRIVER_READ_MAX (64U * 1024U)
 #define NBDRIVER_WRITE_MAX (64U * 1024U)
 
@@ -155,6 +157,69 @@ struct nbdriver_runtime_control {
 	_IOR(NBDRIVER_IOC_MAGIC, 0x22, struct nbdriver_runtime_status)
 #define NBDRIVER_IOC_RUNTIME_CONTROL \
 	_IOWR(NBDRIVER_IOC_MAGIC, 0x23, struct nbdriver_runtime_control)
+
+/* Kernel-collected touchscreen snapshot. The kernel kprobe observes input_event
+ * and publishes a coherent frame; userspace never opens /dev/input/event*. */
+#define NBDRIVER_TOUCH_ABI_VERSION 1U
+#define NBDRIVER_TOUCH_MAX_CONTACTS 10U
+#define NBDRIVER_TOUCH_F_VALID       (1U << 0)
+#define NBDRIVER_TOUCH_F_MT          (1U << 1)
+#define NBDRIVER_TOUCH_F_SYN_DROPPED (1U << 2)
+#define NBDRIVER_TOUCH_CONTACT_DOWN  (1U << 0)
+#define NBDRIVER_TOUCH_VIRTUAL_ABI_VERSION 1U
+#define NBDRIVER_TOUCH_VIRTUAL_INIT    1U
+#define NBDRIVER_TOUCH_VIRTUAL_DOWN    2U
+#define NBDRIVER_TOUCH_VIRTUAL_MOVE    3U
+#define NBDRIVER_TOUCH_VIRTUAL_UP      4U
+#define NBDRIVER_TOUCH_VIRTUAL_DESTROY 5U
+
+struct nbdriver_touch_contact {
+	nbdriver_s32 tracking_id;
+	nbdriver_s32 x;
+	nbdriver_s32 y;
+	nbdriver_s32 pressure;
+	nbdriver_u32 flags;
+	nbdriver_u32 reserved;
+};
+
+struct nbdriver_touch_snapshot {
+	nbdriver_u32 version;
+	nbdriver_u32 size;
+	nbdriver_u32 flags;
+	nbdriver_u32 count;
+	nbdriver_s32 x_min;
+	nbdriver_s32 x_max;
+	nbdriver_s32 y_min;
+	nbdriver_s32 y_max;
+	nbdriver_u64 sequence;
+	nbdriver_u64 timestamp_ns;
+	struct nbdriver_touch_contact contacts[NBDRIVER_TOUCH_MAX_CONTACTS];
+};
+
+struct nbdriver_touch_virtual_request {
+	nbdriver_u32 version;
+	nbdriver_u32 size;
+	nbdriver_u32 operation;
+	nbdriver_u32 slot;
+	nbdriver_s32 x;
+	nbdriver_s32 y;
+	nbdriver_u32 virtual_slots;
+	nbdriver_u32 screen_width;
+	nbdriver_u32 screen_height;
+	nbdriver_s32 x_min;
+	nbdriver_s32 x_max;
+	nbdriver_s32 y_min;
+	nbdriver_s32 y_max;
+	nbdriver_u32 active;
+	nbdriver_s32 error;
+	nbdriver_u32 reserved[2];
+};
+
+#define NBDRIVER_IOC_TOUCH_VIRTUAL \
+	_IOWR(NBDRIVER_IOC_MAGIC, 0x2a, struct nbdriver_touch_virtual_request)
+
+#define NBDRIVER_IOC_TOUCH_READ \
+	_IOR(NBDRIVER_IOC_MAGIC, 0x29, struct nbdriver_touch_snapshot)
 
 /* 只请求当前调用线程的固定补充组；内核继续校验真实 SF 身份。 */
 #define NBDRIVER_SF_GROUPS_ABI_VERSION 1U
@@ -516,10 +581,6 @@ struct nbdriver_udp_read_request {
 #define NBDRIVER_IOC_UDP_STATUS \
     _IOR(NBDRIVER_IOC_MAGIC, 0x28, struct nbdriver_udp_status)
 
-/* CPU telemetry shaping, additive ABI 5. Mirrors nbdriver_abi.h. Rewrites what
- * the proc seq_file handlers report for one thread group; real accounting and
- * scheduling are untouched. */
-#define NBDRIVER_FEATURE_CPU_VISIBILITY (1U << 24)
 /* Suppresses the hidden pid in /sys/fs/cgroup/cgroup.{procs,threads} and
  * /proc/locks, which are world readable and not covered by PROC_VISIBILITY.
  * Enablement follows PROC_VISIBILITY; mirrors nbdriver_abi.h. */
@@ -551,32 +612,6 @@ struct nbdriver_udp_read_request {
  * module's messages, leaving the kernel log available to everything else.
  * Mirrors nbdriver_abi.h. */
 #define NBDRIVER_FEATURE_PRINTK_VISIBILITY (1U << 30)
-
-#define NBDRIVER_CPU_VISIBILITY_QUERY 0U
-#define NBDRIVER_CPU_VISIBILITY_SET   1U
-#define NBDRIVER_CPU_VISIBILITY_CLEAR 2U
-#define NBDRIVER_CPU_VISIBILITY_MAX_TARGETS 32U
-#define NBDRIVER_CPU_VISIBILITY_PCT_MIN 1U
-#define NBDRIVER_CPU_VISIBILITY_PCT_MAX 100U
-
-struct nbdriver_cpu_visibility_request {
-    nbdriver_s32 pid;
-    nbdriver_u32 operation;
-    nbdriver_u64 expected_start_ns;
-    nbdriver_u32 pct_lo;
-    nbdriver_u32 pct_hi;
-    nbdriver_u32 active;
-    nbdriver_u32 target_count;
-    nbdriver_u32 current_pct;
-    nbdriver_u32 hits;
-    nbdriver_s32 error;
-    nbdriver_u32 reserved;
-    nbdriver_u64 missed;
-    nbdriver_u64 sample_ns;
-};
-
-#define NBDRIVER_IOC_CPU_VISIBILITY \
-    _IOWR(NBDRIVER_IOC_MAGIC, 0x29, struct nbdriver_cpu_visibility_request)
 
 #endif /* NBDRIVER_ABI_H */
 
@@ -1214,45 +1249,72 @@ static inline int nbdriver_udp_capture_stop(int fd)
     return ioctl(fd, NBDRIVER_IOC_UDP_STOP, 0);
 }
 
-/* CPU telemetry shaping. The driver validates identity, bounds and the caller's
- * CAP_SYS_PTRACE. QUERY with pid 0 reports global state; CLEAR removes one pid. */
-static inline int nbdriver_cpu_visibility(int fd, int pid, nbdriver_u32 operation,
-    nbdriver_u64 expected_start_ns, nbdriver_u32 pct_lo, nbdriver_u32 pct_hi,
-    struct nbdriver_cpu_visibility_request *out)
+/* Read the latest kernel-collected touch frame. No input device is opened here. */
+static inline int nbdriver_touch_read(int fd, struct nbdriver_touch_snapshot *out)
 {
-    if (!out) { errno = EINVAL; return -1; }
-    memset(out, 0, sizeof(*out));
-    if (fd < 0 || pid < 0 || operation > NBDRIVER_CPU_VISIBILITY_CLEAR ||
-        (!pid && operation != NBDRIVER_CPU_VISIBILITY_QUERY)) {
-        errno = EINVAL; return -1;
-    }
-    if (operation == NBDRIVER_CPU_VISIBILITY_SET &&
-        (pct_lo < NBDRIVER_CPU_VISIBILITY_PCT_MIN ||
-         pct_hi > NBDRIVER_CPU_VISIBILITY_PCT_MAX || pct_lo > pct_hi)) {
-        errno = EINVAL; return -1;
-    }
-    out->pid = pid;
-    out->operation = operation;
-    out->expected_start_ns = expected_start_ns;
-    out->pct_lo = pct_lo;
-    out->pct_hi = pct_hi;
-    return ioctl(fd, NBDRIVER_IOC_CPU_VISIBILITY, out);
+	if (fd < 0 || !out) { errno = EINVAL; return -1; }
+	memset(out, 0, sizeof(*out));
+	if (ioctl(fd, NBDRIVER_IOC_TOUCH_READ, out) < 0) return -1;
+	if (out->version != NBDRIVER_TOUCH_ABI_VERSION ||
+	    out->size != sizeof(*out) || out->count > NBDRIVER_TOUCH_MAX_CONTACTS) {
+		errno = EPROTO; return -1;
+	}
+	return 0;
 }
 
-/* Clamp the visible CPU rate of one thread group into [pct_lo, pct_hi]. */
-static inline int nbdriver_set_cpu_range(int fd, int pid, nbdriver_u32 pct_lo,
-    nbdriver_u32 pct_hi)
+static inline int nbdriver_touch_virtual(int fd,
+	struct nbdriver_touch_virtual_request *request)
 {
-    struct nbdriver_cpu_visibility_request out;
-    return nbdriver_cpu_visibility(fd, pid, NBDRIVER_CPU_VISIBILITY_SET, 0,
-        pct_lo, pct_hi, &out);
+	if (fd < 0 || !request || request->version != NBDRIVER_TOUCH_VIRTUAL_ABI_VERSION ||
+	    request->size != sizeof(*request)) { errno = EINVAL; return -1; }
+	if (ioctl(fd, NBDRIVER_IOC_TOUCH_VIRTUAL, request) < 0) return -1;
+	if (request->version != NBDRIVER_TOUCH_VIRTUAL_ABI_VERSION ||
+	    request->size != sizeof(*request)) { errno = EPROTO; return -1; }
+	if (request->error) { errno = request->error < 0 ? -request->error : EPROTO; return -1; }
+	return 0;
 }
 
-static inline int nbdriver_clear_cpu_range(int fd, int pid)
+static inline int nbdriver_touch_virtual_init(int fd, unsigned virtual_slots,
+	unsigned screen_width, unsigned screen_height,
+	struct nbdriver_touch_virtual_request *out)
 {
-    struct nbdriver_cpu_visibility_request out;
-    return nbdriver_cpu_visibility(fd, pid, NBDRIVER_CPU_VISIBILITY_CLEAR, 0,
-        0, 0, &out);
+	struct nbdriver_touch_virtual_request request;
+	memset(&request, 0, sizeof(request));
+	request.version = NBDRIVER_TOUCH_VIRTUAL_ABI_VERSION;
+	request.size = sizeof(request);
+	request.operation = NBDRIVER_TOUCH_VIRTUAL_INIT;
+	request.virtual_slots = virtual_slots;
+	request.screen_width = screen_width;
+	request.screen_height = screen_height;
+	if (nbdriver_touch_virtual(fd, &request) < 0) return -1;
+	if (out) *out = request;
+	return 0;
+}
+
+static inline int nbdriver_touch_virtual_event(int fd, unsigned operation,
+	unsigned slot, int x, int y, unsigned screen_width, unsigned screen_height)
+{
+	struct nbdriver_touch_virtual_request request;
+	memset(&request, 0, sizeof(request));
+	request.version = NBDRIVER_TOUCH_VIRTUAL_ABI_VERSION;
+	request.size = sizeof(request);
+	request.operation = operation;
+	request.slot = slot;
+	request.x = x;
+	request.y = y;
+	request.screen_width = screen_width;
+	request.screen_height = screen_height;
+	return nbdriver_touch_virtual(fd, &request);
+}
+
+static inline int nbdriver_touch_virtual_destroy(int fd)
+{
+	struct nbdriver_touch_virtual_request request;
+	memset(&request, 0, sizeof(request));
+	request.version = NBDRIVER_TOUCH_VIRTUAL_ABI_VERSION;
+	request.size = sizeof(request);
+	request.operation = NBDRIVER_TOUCH_VIRTUAL_DESTROY;
+	return nbdriver_touch_virtual(fd, &request);
 }
 
 #ifdef __cplusplus

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * 当前职责：模块生命周期、匿名 FD/ioctl、读写/READV、进程/线程和页表。
- * 公共协议位于 sdk/include/nbdriver_abi.h；其他五个编译单元见 src/Makefile。
+ * 公共协议位于 sdk/include/nbdriver_abi.h；实现编译单元见 src/Makefile。
  * 初始化先准备各后端，最后发布连接入口；失败按已完成阶段回收。
  * UDP 是可选后端；feature 不可用不等于整个驱动初始化失败。
  * GET_ABI 仅报告能力，具体请求仍可失败；QUIESCE 的业务拦截在统一分发处。
@@ -27,6 +27,7 @@
 #include "nbdriver_runtime.h"
 #include "nbdriver_sf_groups.h"
 #include "nbdriver_udp.h"
+#include "nbdriver_touch.h"
 
 static int __init nbdriver_init(void)
 {
@@ -44,10 +45,16 @@ static int __init nbdriver_init(void)
 		goto err_comm;
 	}
 
+	ret = nbdriver_touch_init();
+	if (ret) {
+		nbd_err("stage=module_init dependency=touch error=%d\n", ret);
+		goto err_ksym;
+	}
+
 	ret = nbdriver_cfi_init();
 	if (ret) {
 		nbd_err("stage=module_init dependency=cfi error=%d\n", ret);
-		goto err_ksym;
+		goto err_touch;
 	}
 
 	ret = nbdriver_read_init();
@@ -100,6 +107,8 @@ err_read:
 	nbdriver_read_exit();
 err_cfi:
 	nbdriver_cfi_exit();
+err_touch:
+	nbdriver_touch_exit();
 err_ksym:
 	nbdriver_ksym_exit();
 err_comm:
@@ -117,6 +126,7 @@ static void __exit nbdriver_exit(void)
 	nbdriver_query_exit();
 	nbdriver_read_exit();
 	nbdriver_cfi_exit();
+	nbdriver_touch_exit();
 	nbdriver_ksym_exit();
 	nbdriver_comm_exit();
 	nbd_info("stage=module_exit status=unloaded\n");
@@ -179,8 +189,6 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 	case NBDRIVER_IOC_GPU_VISIBILITY:
 	case NBDRIVER_IOC_GPU_INFO:
 	case NBDRIVER_IOC_RANDOM:
-	case NBDRIVER_IOC_CPU_VISIBILITY:
-		return nbdriver_metadata_ioctl(command, argument);
 	case NBDRIVER_IOC_DEVPTS_STATUS:
 		return nbdriver_devpts_status_ioctl(argument);
 	case NBDRIVER_IOC_FIND_PROCESS:
@@ -197,6 +205,9 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 		return nbdriver_read_ioctl(argument);
 	case NBDRIVER_IOC_WRITE_PROCESS:
 		return nbdriver_write_ioctl(argument);
+	case NBDRIVER_IOC_TOUCH_READ:
+	case NBDRIVER_IOC_TOUCH_VIRTUAL:
+		return nbdriver_touch_ioctl(file, command, argument);
 	case NBDRIVER_IOC_GET_ABI: {
 		struct nbdriver_abi_info info = {
 			.version = NBDRIVER_ABI_VERSION,
@@ -209,6 +220,7 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 				 nbdriver_runtime_features() |
 				 NBDRIVER_FEATURE_SF_GROUPS |
 				 nbdriver_udp_features() |
+				 nbdriver_touch_features() |
 				 (nbdriver_read_fault_in_ready() ?
 				 NBDRIVER_FEATURE_READ_FAULT_IN : 0),
 			.reserved = 0,
@@ -242,6 +254,8 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 static int nbdriver_comm_release(struct inode *inode, struct file *file)
 {
 	(void)inode;
+	/* A dead client must never leave a synthetic contact pressed. */
+	nbdriver_touch_release(file);
 	nbdriver_udp_release(file);
 	return 0;
 }

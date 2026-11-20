@@ -56,8 +56,15 @@ def main():
     parser.add_argument('--directory', type=Path, required=True)
     parser.add_argument('--profiles', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--signing-key', type=Path, help='Ed25519 publisher key; private key stays on this host')
     a = parser.parse_args()
+    if a.signing_key and a.output.resolve() != (a.directory / 'nbdriver-manifest.json').resolve():
+        parser.error('signed publication output must be directory/nbdriver-manifest.json')
     print('NBG_NBDRIVER_MANIFEST_SHA256=' + publish(a.directory, json.loads(a.profiles.read_text()), a.output))
+    if a.signing_key:
+        from sign_manifest import sign
+        signed = sign(a.directory, a.signing_key)
+        print('NBG_NBDRIVER_RELEASE_SEQUENCE=' + str(signed['sequence']))
 
 if __name__ == '__main__':
     main()

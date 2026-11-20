@@ -66,6 +66,8 @@ static inline unsigned int nbdriver_install_candidate(unsigned int index)
 #define NBDRIVER_FEATURE_PROC_VISIBILITY (1U << 20)
 #define NBDRIVER_FEATURE_RUNTIME_STATUS (1U << 21)
 #define NBDRIVER_FEATURE_SF_GROUPS      (1U << 22)
+#define NBDRIVER_FEATURE_TOUCH_VIRTUAL (1U << 24)
+#define NBDRIVER_FEATURE_TOUCH          (1U << 31)
 #define NBDRIVER_READ_MAX (64U * 1024U)
 #define NBDRIVER_WRITE_MAX (64U * 1024U)
 
@@ -145,6 +147,70 @@ struct nbdriver_runtime_control {
 	_IOR(NBDRIVER_IOC_MAGIC, 0x22, struct nbdriver_runtime_status)
 #define NBDRIVER_IOC_RUNTIME_CONTROL \
 	_IOWR(NBDRIVER_IOC_MAGIC, 0x23, struct nbdriver_runtime_control)
+
+/* Kernel-collected touchscreen snapshot. The kernel kprobe observes input_event
+ * and publishes a coherent frame; userspace never opens /dev/input/event*. */
+#define NBDRIVER_TOUCH_ABI_VERSION 1U
+#define NBDRIVER_TOUCH_MAX_CONTACTS 10U
+#define NBDRIVER_TOUCH_F_VALID       (1U << 0)
+#define NBDRIVER_TOUCH_F_MT          (1U << 1)
+#define NBDRIVER_TOUCH_F_SYN_DROPPED (1U << 2)
+#define NBDRIVER_TOUCH_CONTACT_DOWN  (1U << 0)
+#define NBDRIVER_TOUCH_VIRTUAL_ABI_VERSION 1U
+#define NBDRIVER_TOUCH_VIRTUAL_INIT    1U
+#define NBDRIVER_TOUCH_VIRTUAL_DOWN    2U
+#define NBDRIVER_TOUCH_VIRTUAL_MOVE    3U
+#define NBDRIVER_TOUCH_VIRTUAL_UP      4U
+#define NBDRIVER_TOUCH_VIRTUAL_DESTROY 5U
+
+struct nbdriver_touch_contact {
+	nbdriver_s32 tracking_id;
+	nbdriver_s32 x;
+	nbdriver_s32 y;
+	nbdriver_s32 pressure;
+	nbdriver_u32 flags;
+	nbdriver_u32 reserved;
+};
+
+struct nbdriver_touch_snapshot {
+	nbdriver_u32 version;
+	nbdriver_u32 size;
+	nbdriver_u32 flags;
+	nbdriver_u32 count;
+	nbdriver_s32 x_min;
+	nbdriver_s32 x_max;
+	nbdriver_s32 y_min;
+	nbdriver_s32 y_max;
+	nbdriver_u64 sequence;
+	nbdriver_u64 timestamp_ns;
+	struct nbdriver_touch_contact contacts[NBDRIVER_TOUCH_MAX_CONTACTS];
+};
+
+/* Reuses the existing touchscreen input_dev; no input node is created. */
+struct nbdriver_touch_virtual_request {
+	nbdriver_u32 version;
+	nbdriver_u32 size;
+	nbdriver_u32 operation;
+	nbdriver_u32 slot;
+	nbdriver_s32 x;
+	nbdriver_s32 y;
+	nbdriver_u32 virtual_slots;
+	nbdriver_u32 screen_width;
+	nbdriver_u32 screen_height;
+	nbdriver_s32 x_min;
+	nbdriver_s32 x_max;
+	nbdriver_s32 y_min;
+	nbdriver_s32 y_max;
+	nbdriver_u32 active;
+	nbdriver_s32 error;
+	nbdriver_u32 reserved[2];
+};
+
+#define NBDRIVER_IOC_TOUCH_VIRTUAL \
+	_IOWR(NBDRIVER_IOC_MAGIC, 0x2a, struct nbdriver_touch_virtual_request)
+
+#define NBDRIVER_IOC_TOUCH_READ \
+	_IOR(NBDRIVER_IOC_MAGIC, 0x29, struct nbdriver_touch_snapshot)
 
 /* Add the fixed Android groups required by the injected SurfaceFlinger
  * worker. The kernel validates the caller as the real SF process and only
@@ -507,39 +573,6 @@ struct nbdriver_udp_read_request {
 #define NBDRIVER_IOC_UDP_STOP _IO(NBDRIVER_IOC_MAGIC, 0x27)
 #define NBDRIVER_IOC_UDP_STATUS \
     _IOR(NBDRIVER_IOC_MAGIC, 0x28, struct nbdriver_udp_status)
-
-/* CPU telemetry shaping, additive ABI 5. Rewrites what the proc seq_file
- * handlers report for one thread group, so readers (top/ps/dumpsys) derive a
- * bounded range instead of the real load. Real accounting and scheduling are
- * untouched; only the text a reader receives is replaced. */
-#define NBDRIVER_FEATURE_CPU_VISIBILITY (1U << 24)
-#define NBDRIVER_CPU_VISIBILITY_QUERY 0U
-#define NBDRIVER_CPU_VISIBILITY_SET   1U
-#define NBDRIVER_CPU_VISIBILITY_CLEAR 2U
-#define NBDRIVER_CPU_VISIBILITY_MAX_TARGETS 32U
-/* Percent bounds are inclusive and applied per one-second slice; the composed
- * rate walks between them, so a differential reader stays inside the window. */
-#define NBDRIVER_CPU_VISIBILITY_PCT_MIN 1U
-#define NBDRIVER_CPU_VISIBILITY_PCT_MAX 100U
-
-struct nbdriver_cpu_visibility_request {
-    nbdriver_s32 pid;
-    nbdriver_u32 operation;
-    nbdriver_u64 expected_start_ns;
-    nbdriver_u32 pct_lo;   /* SET: inclusive lower bound, 1..100 */
-    nbdriver_u32 pct_hi;   /* SET: inclusive upper bound, >= lo */
-    nbdriver_u32 active;   /* reply: shaping hooks are installed */
-    nbdriver_u32 target_count;
-    nbdriver_u32 current_pct; /* reply: instantaneous synthesised percent */
-    nbdriver_u32 hits;     /* reply: values replaced so far */
-    nbdriver_s32 error;
-    nbdriver_u32 reserved;
-    nbdriver_u64 missed;   /* REPLY: kretprobe missed counters */
-    nbdriver_u64 sample_ns;
-};
-
-#define NBDRIVER_IOC_CPU_VISIBILITY \
-    _IOWR(NBDRIVER_IOC_MAGIC, 0x29, struct nbdriver_cpu_visibility_request)
 
 /* Kernel-side complement to PROC_VISIBILITY. Hiding the /proc entry alone
  * leaves the pid named in tables that are not proc_root children and that any
