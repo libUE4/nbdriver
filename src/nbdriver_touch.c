@@ -353,8 +353,9 @@ static int nbdriver_touch_virtual_report_locked(unsigned int slot,
 
 static void nbdriver_touch_virtual_reset_locked(void)
 {
+	unsigned int i;
 	memset(&nbdriver_touch_virtual, 0, sizeof(nbdriver_touch_virtual));
-	for (unsigned int i = 0; i < NBDRIVER_TOUCH_VIRTUAL_MAX; ++i)
+	for (i = 0; i < NBDRIVER_TOUCH_VIRTUAL_MAX; ++i)
 		nbdriver_touch_virtual.tracking_ids[i] = -1;
 	nbdriver_touch_virtual.next_tracking_id = 40000;
 }
@@ -421,8 +422,11 @@ static int nbdriver_touch_virtual_init_locked(
 	mt->flags |= INPUT_MT_DIRECT;
 	mt->flags &= ~INPUT_MT_POINTER;
 	input_set_abs_params(dev, ABS_MT_SLOT, 0, (int)slots - 1, 0, 0);
-	for (unsigned int i = 0; i < NBDRIVER_TOUCH_VIRTUAL_MAX; ++i)
-		nbdriver_touch_virtual.tracking_ids[i] = -1;
+	{
+		unsigned int i;
+		for (i = 0; i < NBDRIVER_TOUCH_VIRTUAL_MAX; ++i)
+			nbdriver_touch_virtual.tracking_ids[i] = -1;
+	}
 	nbdriver_touch_virtual.initialized = true;
 	nbd_info("stage=touch_virtual operation=init status=ready owner_pid=%d slots=%u physical_slots=%u range=%d..%d,%d..%d\n",
 		 current->tgid, request->virtual_slots,
