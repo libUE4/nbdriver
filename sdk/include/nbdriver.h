@@ -76,6 +76,7 @@ static inline unsigned int nbdriver_install_candidate(unsigned int index)
 #define NBDRIVER_FEATURE_PROC_VISIBILITY (1U << 20)
 #define NBDRIVER_FEATURE_RUNTIME_STATUS (1U << 21)
 #define NBDRIVER_FEATURE_SF_GROUPS      (1U << 22)
+#define NBDRIVER_FEATURE_TOUCH_CAPTURE (1U << 23)
 #define NBDRIVER_FEATURE_TOUCH_VIRTUAL (1U << 24)
 #define NBDRIVER_FEATURE_TOUCH          (1U << 31)
 #define NBDRIVER_READ_MAX (64U * 1024U)
@@ -165,7 +166,9 @@ struct nbdriver_runtime_control {
 #define NBDRIVER_TOUCH_F_VALID       (1U << 0)
 #define NBDRIVER_TOUCH_F_MT          (1U << 1)
 #define NBDRIVER_TOUCH_F_SYN_DROPPED (1U << 2)
+#define NBDRIVER_TOUCH_F_ROUTED      (1U << 3)
 #define NBDRIVER_TOUCH_CONTACT_DOWN  (1U << 0)
+#define NBDRIVER_TOUCH_CONTACT_UI    (1U << 1)
 #define NBDRIVER_TOUCH_VIRTUAL_ABI_VERSION 1U
 #define NBDRIVER_TOUCH_VIRTUAL_INIT    1U
 #define NBDRIVER_TOUCH_VIRTUAL_DOWN    2U
@@ -220,6 +223,22 @@ struct nbdriver_touch_virtual_request {
 
 #define NBDRIVER_IOC_TOUCH_READ \
 	_IOR(NBDRIVER_IOC_MAGIC, 0x29, struct nbdriver_touch_snapshot)
+
+/* Private overlay capture; rectangles use raw panel coordinates. */
+#define NBDRIVER_TOUCH_CAPTURE_ABI_VERSION 1U
+#define NBDRIVER_TOUCH_CAPTURE_RECTS 16U
+struct nbdriver_touch_capture_rect {
+    nbdriver_s32 left, top, right, bottom;
+    nbdriver_s32 radius_x, radius_y;
+};
+struct nbdriver_touch_capture_request {
+    nbdriver_u32 version, size, enabled, count;
+    struct nbdriver_touch_capture_rect rects[NBDRIVER_TOUCH_CAPTURE_RECTS];
+    nbdriver_u32 active;
+    nbdriver_s32 error;
+};
+#define NBDRIVER_IOC_TOUCH_CAPTURE \
+    _IOWR(NBDRIVER_IOC_MAGIC, 0x2b, struct nbdriver_touch_capture_request)
 
 /* 只请求当前调用线程的固定补充组；内核继续校验真实 SF 身份。 */
 #define NBDRIVER_SF_GROUPS_ABI_VERSION 1U
@@ -392,6 +411,20 @@ struct nbdriver_mapping_request {
 	nbdriver_u32 flags;
 	nbdriver_u32 reserved2;
 };
+
+/* Exact seek on a separate description of a regular target file. The target
+ * file position is unchanged. Transport errors use error; syscall errno is
+ * returned as a negative result. SEEK_CUR is deliberately unsupported. */
+struct nbdriver_fd_seek_request {
+ nbdriver_s32 pid, target_fd;
+ nbdriver_u64 expected_start_ns;
+ nbdriver_s64 offset, result;
+ nbdriver_u32 whence;
+ nbdriver_s32 error;
+ nbdriver_u64 reserved;
+};
+#define NBDRIVER_IOC_FD_SEEK \
+ _IOWR(NBDRIVER_IOC_MAGIC, 0x2c, struct nbdriver_fd_seek_request)
 
 struct nbdriver_fd_size_request {
 	nbdriver_s32 pid;
@@ -1053,6 +1086,22 @@ static inline int nbdriver_query_mapping(int fd, int pid, nbdriver_u64 address,
 	return ioctl(fd, NBDRIVER_IOC_MAPPING, out);
 }
 
+static inline int nbdriver_query_file_seek(int fd, int pid, int target_fd,
+ nbdriver_u64 expected_start_ns, nbdriver_s64 offset, nbdriver_u32 whence,
+ struct nbdriver_fd_seek_request *out)
+{
+ if (!out) { errno = EINVAL; return -1; }
+ memset(out, 0, sizeof(*out));
+ if (fd < 0 || pid <= 0 || target_fd < 0 ||
+     (whence != 0 && whence != 2 && whence != 3 && whence != 4)) {
+  errno = EINVAL; return -1;
+ }
+ out->pid = pid; out->target_fd = target_fd;
+ out->expected_start_ns = expected_start_ns;
+ out->offset = offset; out->whence = whence;
+ return ioctl(fd, NBDRIVER_IOC_FD_SEEK, out);
+}
+
 static inline int nbdriver_get_file_descriptor_size(int fd, int pid, int target_fd,
 	nbdriver_u64 expected_start_ns, nbdriver_u64 *size)
 {
@@ -1260,6 +1309,20 @@ static inline int nbdriver_touch_read(int fd, struct nbdriver_touch_snapshot *ou
 		errno = EPROTO; return -1;
 	}
 	return 0;
+}
+
+static inline int nbdriver_touch_capture(int fd,
+    struct nbdriver_touch_capture_request *request)
+{
+    if (fd < 0 || !request || request->version != NBDRIVER_TOUCH_CAPTURE_ABI_VERSION ||
+        request->size != sizeof(*request) || request->count > NBDRIVER_TOUCH_CAPTURE_RECTS) {
+        errno = EINVAL; return -1;
+    }
+    if (ioctl(fd, NBDRIVER_IOC_TOUCH_CAPTURE, request) < 0) return -1;
+    if (request->version != NBDRIVER_TOUCH_CAPTURE_ABI_VERSION ||
+        request->size != sizeof(*request)) { errno = EPROTO; return -1; }
+    if (request->error) { errno = request->error < 0 ? -request->error : EPROTO; return -1; }
+    return 0;
 }
 
 static inline int nbdriver_touch_virtual(int fd,

@@ -185,6 +185,7 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 	case NBDRIVER_IOC_MAPPING:
 	case NBDRIVER_IOC_VMA:
 	case NBDRIVER_IOC_FD_SIZE:
+	case NBDRIVER_IOC_FD_SEEK:
 	case NBDRIVER_IOC_GPU_SYNC:
 	case NBDRIVER_IOC_GPU_VISIBILITY:
 	case NBDRIVER_IOC_GPU_INFO:
@@ -206,6 +207,7 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 		return nbdriver_read_ioctl(argument);
 	case NBDRIVER_IOC_WRITE_PROCESS:
 		return nbdriver_write_ioctl(argument);
+	case NBDRIVER_IOC_TOUCH_CAPTURE:
 	case NBDRIVER_IOC_TOUCH_READ:
 	case NBDRIVER_IOC_TOUCH_VIRTUAL:
 		return nbdriver_touch_ioctl(file, command, argument);

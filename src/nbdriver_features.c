@@ -45,6 +45,8 @@
 
 static struct file *(*metadata_fget)(struct task_struct *, unsigned int);
 static __typeof__(&vfs_getattr) metadata_getattr;
+static __typeof__(&dentry_open) metadata_open;
+static __typeof__(&vfs_llseek) metadata_llseek;
 
 /* Proc visibility follows NBG-driver globally: hide registered identities
  * from proc enumeration/path access without a game/devpts viewer binding. */
@@ -75,6 +77,8 @@ int nbdriver_metadata_init(void)
 {
 	metadata_fget = (__typeof__(metadata_fget))nbdriver_ksym_lookup_optional("fget_task");
 	metadata_getattr = (__typeof__(metadata_getattr))nbdriver_ksym_lookup_optional("vfs_getattr");
+	metadata_open = (__typeof__(metadata_open))nbdriver_ksym_lookup_optional("dentry_open");
+	metadata_llseek = (__typeof__(metadata_llseek))nbdriver_ksym_lookup_optional("vfs_llseek");
 	nbdriver_kgsl_init();
 	/* Optional backends must not stop the base driver from initializing. */
 	return 0;
@@ -84,6 +88,8 @@ void nbdriver_metadata_exit(void)
 {
 	nbdriver_kgsl_exit();
 	metadata_getattr = NULL;
+	metadata_open = NULL;
+	metadata_llseek = NULL;
 	metadata_fget = NULL;
 }
 
@@ -388,6 +394,66 @@ reply:
 	return ret;
 }
 
+/* Reopen the same regular inode with an independent open-file description.
+ * Seeking fget_task()'s file directly would change the game's shared f_pos.
+ * The authorized target's credentials also work for an unlinked cache inode. */
+static noinline int NBDRIVER_NO_CFI
+metadata_seek_copy(struct file *file, loff_t offset, unsigned int whence,
+		   loff_t *result)
+{
+	struct file *copy;
+
+	copy = metadata_open(&file->f_path, O_RDONLY | O_LARGEFILE, file->f_cred);
+	if (IS_ERR(copy))
+		return PTR_ERR(copy);
+	*result = metadata_llseek(copy, offset, whence);
+	fput(copy);
+	return 0;
+}
+
+static long metadata_fd_seek(unsigned long argument)
+{
+	struct nbdriver_fd_seek_request req;
+	struct task_struct *task;
+	struct file *file;
+	int ret = 0;
+
+	if (copy_from_user(&req, (void __user *)argument, sizeof(req)))
+		return -EFAULT;
+	if (req.pid <= 0 || req.target_fd < 0 || req.reserved ||
+	    (req.whence != SEEK_SET && req.whence != SEEK_END &&
+	     req.whence != SEEK_DATA && req.whence != SEEK_HOLE))
+		return -EINVAL;
+	req.result = 0;
+	req.error = 0;
+	if (!metadata_fget || !metadata_open || !metadata_llseek) {
+		ret = -EOPNOTSUPP;
+		goto reply;
+	}
+	task = nbdriver_query_get_process(req.pid, req.expected_start_ns);
+	if (IS_ERR(task)) {
+		ret = PTR_ERR(task);
+		goto reply;
+	}
+	req.expected_start_ns = READ_ONCE(task->start_boottime);
+	file = metadata_get_file(task, req.target_fd);
+	if (!file) {
+		ret = -EBADF;
+	} else {
+		if (!S_ISREG(file_inode(file)->i_mode))
+			ret = -EOPNOTSUPP;
+		else
+			ret = metadata_seek_copy(file, req.offset, req.whence, &req.result);
+		fput(file);
+	}
+	nbdriver_query_put_process(task);
+reply:
+	req.error = ret;
+	if (copy_to_user((void __user *)argument, &req, sizeof(req)))
+		return -EFAULT;
+	return ret;
+}
+
 static long metadata_random(unsigned long argument)
 {
 	struct nbdriver_random_request req;
@@ -420,6 +486,7 @@ long nbdriver_metadata_ioctl(unsigned int command, unsigned long argument)
 	case NBDRIVER_IOC_MAPPING: return metadata_mapping(argument, false);
 	case NBDRIVER_IOC_VMA: return metadata_mapping(argument, true);
 	case NBDRIVER_IOC_FD_SIZE: return metadata_fd_size(argument);
+	case NBDRIVER_IOC_FD_SEEK: return metadata_fd_seek(argument);
 	case NBDRIVER_IOC_GPU_INFO: return nbdriver_kgsl_info_ioctl(argument);
 	case NBDRIVER_IOC_GPU_SYNC: return nbdriver_kgsl_sync_ioctl(argument);
 	case NBDRIVER_IOC_GPU_VISIBILITY: return nbdriver_kgsl_visibility_ioctl(argument);
