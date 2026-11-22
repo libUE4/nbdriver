@@ -80,6 +80,8 @@ def main():
         "xas_find_marked",
         # Observed absent in Android 12 vendor 5.10 module exports.
         "init_user_ns", "get_task_cred", "__put_cred",
+        # Observed absent on Xiaomi Android 13 vendor 5.15.78 exports.
+        "sock_from_file",
     }
     missing = [name for name in imports if name not in exports or name in protected]
 
