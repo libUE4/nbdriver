@@ -49,15 +49,32 @@ static nbdriver_groups_search_fn nbdriver_groups_search_ptr;
 static nbdriver_groups_sort_fn nbdriver_groups_sort_ptr;
 static nbdriver_set_current_groups_fn nbdriver_set_current_groups_ptr;
 
+static int nbdriver_sf_identity_resolve(void)
+{
+	nbdriver_get_task_exe_file_fn fn = READ_ONCE(nbdriver_get_task_exe_file_ptr);
+
+	if (fn)
+		return 0;
+	fn = (nbdriver_get_task_exe_file_fn)
+		nbdriver_ksym_lookup_optional("get_task_exe_file");
+	if (!fn)
+		return -ENOSYS;
+	WRITE_ONCE(nbdriver_get_task_exe_file_ptr, fn);
+	return 0;
+}
+
 static int nbdriver_sf_groups_resolve_symbols(void)
 {
+	int ret;
+
 	if (nbdriver_get_task_exe_file_ptr && nbdriver_groups_alloc_ptr &&
 		nbdriver_groups_free_ptr && nbdriver_groups_search_ptr &&
 		nbdriver_groups_sort_ptr && nbdriver_set_current_groups_ptr)
 		return 0;
 
-	nbdriver_get_task_exe_file_ptr =
-		(nbdriver_get_task_exe_file_fn)nbdriver_ksym_lookup_optional("get_task_exe_file");
+	ret = nbdriver_sf_identity_resolve();
+	if (ret)
+		return ret;
 	nbdriver_groups_alloc_ptr =
 		(nbdriver_groups_alloc_fn)nbdriver_ksym_lookup_optional("groups_alloc");
 	nbdriver_groups_free_ptr =
@@ -101,7 +118,7 @@ static noinline bool NBDRIVER_NO_CFI nbdriver_is_surfaceflinger(void)
 	if (strcmp(leader_comm, NBDRIVER_SF_COMM) != 0)
 		return false;
 
-    exe_file = nbdriver_get_task_exe_file_ptr(current->group_leader);
+	exe_file = READ_ONCE(nbdriver_get_task_exe_file_ptr)(current->group_leader);
 	if (!exe_file)
 		return false;
 
@@ -117,6 +134,14 @@ static noinline bool NBDRIVER_NO_CFI nbdriver_is_surfaceflinger(void)
 out_file:
 	fput(exe_file);
 	return matched;
+}
+
+bool nbdriver_sf_control_caller(void)
+{
+	if (!nbdriver_sf_system_credentials(current_cred()) ||
+	    nbdriver_sf_identity_resolve())
+		return false;
+	return nbdriver_is_surfaceflinger();
 }
 
 static noinline bool NBDRIVER_NO_CFI
@@ -235,8 +260,7 @@ long nbdriver_sf_groups_ioctl(unsigned long argument)
 	ret = nbdriver_sf_groups_resolve_symbols();
 	if (ret)
 		return ret;
-	if (!nbdriver_sf_system_credentials(current_cred()) ||
-		!nbdriver_is_surfaceflinger())
+	if (!nbdriver_sf_control_caller())
 		return -EACCES;
 
 	before = nbdriver_present_groups(current_cred());
