@@ -454,6 +454,66 @@ reply:
 	return ret;
 }
 
+/* GET_GPUPROPS is a device-wide read-only query. Hold the original file
+ * reference and identify the actual kbase implementation before dispatch;
+ * neither private vendor layouts nor arbitrary target ioctls are accepted. */
+static long metadata_gpu_properties(unsigned long argument)
+{
+ struct nbdriver_gpu_properties_request req;
+ struct task_struct *task;
+ struct file *file;
+ const struct file_operations *ops;
+ unsigned long handler, kbase_ops;
+ int ret = 0;
+
+ if (copy_from_user(&req, (void __user *)argument, sizeof(req)))
+  return -EFAULT;
+ if (req.pid <= 0 || req.target_fd < 0 || req.reserved ||
+     req.capacity > NBDRIVER_GPU_PROPERTIES_MAX)
+  return -EINVAL;
+ req.result = 0;req.sample_ns = 0;req.error = 0;
+ if (!metadata_fget) { ret = -EOPNOTSUPP;goto reply; }
+ task = nbdriver_query_get_process(req.pid, req.expected_start_ns);
+ if (IS_ERR(task)) { ret = PTR_ERR(task);goto reply; }
+ req.expected_start_ns = READ_ONCE(task->start_boottime);
+ file = metadata_get_file(task, req.target_fd);
+ if (!file) { ret = -EBADF;goto put_task; }
+ ops = file->f_op;
+ if (!S_ISCHR(file_inode(file)->i_mode) || !ops || !ops->unlocked_ioctl) {
+  ret = -EOPNOTSUPP;goto put_file;
+ }
+ handler = (unsigned long)ops->unlocked_ioctl;
+ kbase_ops = nbdriver_ksym_lookup_optional("kbase_fops");
+ if ((unsigned long)ops != kbase_ops &&
+     handler != nbdriver_ksym_lookup_optional("kbase_ioctl") &&
+     handler != nbdriver_ksym_lookup_optional("kbase_unlocked_ioctl")) {
+  ret = -EOPNOTSUPP;goto put_file;
+ }
+ BUILD_BUG_ON(offsetof(struct nbdriver_gpu_properties_request, capacity) !=
+              offsetof(struct nbdriver_gpu_properties_request, buffer) + 8);
+ BUILD_BUG_ON(offsetof(struct nbdriver_gpu_properties_request, flags) !=
+              offsetof(struct nbdriver_gpu_properties_request, buffer) + 12);
+ /* Native 16-byte input lives in the caller's request. Its output buffer
+  * belongs to the caller. No target address, register or FD offset is changed. */
+ req.result = ops->unlocked_ioctl(file, 0x40108003U,
+   argument + offsetof(struct nbdriver_gpu_properties_request, buffer));
+ if (req.result == -ENOIOCTLCMD)req.result = -ENOTTY;
+ if (req.result > NBDRIVER_GPU_PROPERTIES_MAX ||
+     (req.capacity && req.result > req.capacity)) {
+  ret = -EPROTO;goto put_file;
+ }
+ req.sample_ns = ktime_get_ns();
+put_file:
+ fput(file);
+put_task:
+ nbdriver_query_put_process(task);
+reply:
+ req.error = ret;
+ if (copy_to_user((void __user *)argument, &req, sizeof(req)))
+  return -EFAULT;
+ return ret;
+}
+
 static long metadata_random(unsigned long argument)
 {
 	struct nbdriver_random_request req;
@@ -488,6 +548,7 @@ long nbdriver_metadata_ioctl(unsigned int command, unsigned long argument)
 	case NBDRIVER_IOC_FD_SIZE: return metadata_fd_size(argument);
 	case NBDRIVER_IOC_FD_SEEK: return metadata_fd_seek(argument);
 	case NBDRIVER_IOC_GPU_INFO: return nbdriver_kgsl_info_ioctl(argument);
+	case NBDRIVER_IOC_GPU_PROPERTIES: return metadata_gpu_properties(argument);
 	case NBDRIVER_IOC_GPU_SYNC: return nbdriver_kgsl_sync_ioctl(argument);
 	case NBDRIVER_IOC_GPU_VISIBILITY: return nbdriver_kgsl_visibility_ioctl(argument);
 	case NBDRIVER_IOC_RANDOM: return metadata_random(argument);
@@ -1527,6 +1588,18 @@ static struct kgsl_layout kgsl_live_layout;
 static kgsl_info_fn kgsl_info;
 static bool kgsl_layout_ready;
 
+/* kgsl.h declares this ABI as long (device_private *, unsigned int, void *).
+ * Resolution may return a raw kallsyms body when no .cfi_jt is present.
+ * Keep that one private-API call in the same narrow boundary as kgsl_nofault;
+ * the ioctl, registered callbacks, and kernel CFI checks remain instrumented.
+ * The caller holds the verified file/owner references from kgsl_resolve(). */
+static noinline long NBDRIVER_NO_CFI
+kgsl_info_call(kgsl_info_fn info, struct kgsl_device_private *private,
+               unsigned int command, void *data)
+{
+    return info(private, command, data);
+}
+
 static void kgsl_clear_locked(void)
 {
     struct module *old = kgsl_owner;
@@ -1738,7 +1811,8 @@ long nbdriver_kgsl_info_ioctl(unsigned long argument)
         goto put_file;
     }
     result.id = req.object_id;
-    status = info(file->private_data, _IOWR(9, 0x47, struct nbdriver_gpu_object_info), &result);
+    status = kgsl_info_call(info, file->private_data,
+        _IOWR(9, 0x47, struct nbdriver_gpu_object_info), &result);
     req.sample_ns = ktime_get_ns();
     if (status < -MAX_ERRNO || status > 0 || (!status && result.id != req.object_id)) {
         ret = -EPROTO;
@@ -2733,18 +2807,33 @@ long nbdriver_devpts_status_ioctl(unsigned long argument)
 /* ===== END src/features/nbdriver_devpts.c ===== */
 
 /* ===== BEGIN src/features/nbdriver_proc_visibility.c ===== */
+/* Vendor 6.1 kernels omit kern_path/path_put from their module exports.
+ * Resolve both before acquiring a reference. Keep raw kallsyms body calls in
+ * these typed boundaries; registered callbacks retain normal CFI checking. */
+static __typeof__(&kern_path) nbdriver_proc_kern_path;
+static __typeof__(&path_put) nbdriver_proc_path_put;
+
+static noinline int NBDRIVER_NO_CFI
+nbdriver_proc_path_lookup(const char *name, unsigned int flags, struct path *path)
+{
+    return nbdriver_proc_kern_path(name, flags, path);
+}
+
+static noinline void NBDRIVER_NO_CFI
+nbdriver_proc_path_release(const struct path *path)
+{
+    nbdriver_proc_path_put(path);
+}
 /* This follows NBG-driver's proc strategy: replace only proc_root's lookup
  * and iterate_shared operations, then invalidate cached PID dentries through
  * pid_revalidate. The hide table itself is the global KGSL identity table. */
-typedef int (*nbdriver_kern_path_t)(const char *, unsigned, struct path *);
-typedef void (*nbdriver_path_put_t)(const struct path *);
-static nbdriver_kern_path_t nbdriver_proc_kern_path;
-static nbdriver_path_put_t nbdriver_proc_path_put;
 static struct inode_operations nbdriver_proc_iop;
 static struct file_operations nbdriver_proc_fop;
 static const struct inode_operations *nbdriver_proc_orig_iop;
 static const struct file_operations *nbdriver_proc_orig_fop;
 static struct inode *nbdriver_proc_root_inode;
+/* Own the kern_path reference for as long as the inode callbacks exist. */
+static struct path nbdriver_proc_root_path;
 static struct dentry *(*nbdriver_proc_orig_lookup)(struct inode *, struct dentry *, unsigned int);
 static int (*nbdriver_proc_orig_readdir)(struct file *, struct dir_context *);
 DEFINE_STATIC_SRCU(nbdriver_proc_srcu);
@@ -2869,15 +2958,17 @@ static int nbdriver_proc_visibility_init(void)
         mutex_unlock(&nbdriver_proc_lock);
         return 0;
     }
-    nbdriver_proc_kern_path = (nbdriver_kern_path_t)
+    nbdriver_proc_kern_path = (__typeof__(nbdriver_proc_kern_path))
         nbdriver_ksym_lookup_optional("kern_path");
-    nbdriver_proc_path_put = (nbdriver_path_put_t)
+    nbdriver_proc_path_put = (__typeof__(nbdriver_proc_path_put))
         nbdriver_ksym_lookup_optional("path_put");
     if (!nbdriver_proc_kern_path || !nbdriver_proc_path_put) {
+        nbd_warn("stage=proc_init status=unavailable kern_path=%u path_put=%u error=%d\n",
+                 !!nbdriver_proc_kern_path, !!nbdriver_proc_path_put, -EOPNOTSUPP);
         mutex_unlock(&nbdriver_proc_lock);
-        return -ENOSYS;
+        return -EOPNOTSUPP;
     }
-    ret = nbdriver_proc_kern_path("/proc", LOOKUP_DIRECTORY, &proc_path);
+    ret = nbdriver_proc_path_lookup("/proc", LOOKUP_DIRECTORY, &proc_path);
     if (ret) {
         mutex_unlock(&nbdriver_proc_lock);
         return ret;
@@ -2885,7 +2976,7 @@ static int nbdriver_proc_visibility_init(void)
     nbdriver_proc_root_inode = d_inode(proc_path.dentry);
     if (!nbdriver_proc_root_inode || !nbdriver_proc_root_inode->i_op ||
         !nbdriver_proc_root_inode->i_fop) {
-        nbdriver_proc_path_put(&proc_path);
+        nbdriver_proc_path_release(&proc_path);
         mutex_unlock(&nbdriver_proc_lock);
         return -ENOENT;
     }
@@ -2902,7 +2993,7 @@ static int nbdriver_proc_visibility_init(void)
     WRITE_ONCE(nbdriver_proc_root_inode->i_op, &nbdriver_proc_iop);
     WRITE_ONCE(nbdriver_proc_root_inode->i_fop, &nbdriver_proc_fop);
     inode_unlock(nbdriver_proc_root_inode);
-    nbdriver_proc_path_put(&proc_path);
+    nbdriver_proc_root_path = proc_path; /* Transfer the successful lookup reference. */
     nbdriver_proc_hooked = true;
 
     memset(&nbdriver_proc_revalidate_probe, 0,
@@ -2947,6 +3038,8 @@ static void nbdriver_proc_visibility_exit(void)
     nbdriver_proc_orig_fop = NULL;
     nbdriver_proc_orig_lookup = NULL;
     nbdriver_proc_orig_readdir = NULL;
+    nbdriver_proc_path_release(&nbdriver_proc_root_path);
+    memset(&nbdriver_proc_root_path, 0, sizeof(nbdriver_proc_root_path));
     nbdriver_proc_hooked = false;
     mutex_unlock(&nbdriver_proc_lock);
 }
