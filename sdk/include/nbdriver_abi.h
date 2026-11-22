@@ -646,4 +646,32 @@ struct nbdriver_udp_read_request {
  * leaves the kernel log readable for every other consumer. */
 #define NBDRIVER_FEATURE_PRINTK_VISIBILITY (1U << 30)
 
+
+/* Optional gyro extension: discover with STATUS (ENOTTY on older modules).
+ * ABI 5's 32 feature bits are already occupied; no existing bit is reused.
+ * Rates are finite IEEE-754 binary32 bits in rad/s, at most +/-1.
+ * The active lease belongs to this anonymous FD and exact process lifetime.
+ */
+#define NBDRIVER_GYRO_ABI_VERSION 1U
+#define NBDRIVER_GYRO_TYPE_CALIBRATED 1U
+#define NBDRIVER_GYRO_TYPE_UNCALIBRATED 2U
+#define NBDRIVER_GYRO_STATUS 0U
+#define NBDRIVER_GYRO_SET 1U
+#define NBDRIVER_GYRO_STOP 2U
+#define NBDRIVER_GYRO_AVAILABLE (1U << 0)
+#define NBDRIVER_GYRO_ACTIVE (1U << 1)
+#define NBDRIVER_GYRO_MAX_LEASE_MS 250U
+struct nbdriver_gyro_request {
+    nbdriver_u32 version, size, operation, flags;
+    nbdriver_s32 pid;
+    nbdriver_u32 lease_ms;
+    nbdriver_u64 expected_start_ns;
+    nbdriver_u32 type_mask, delta_x_bits, delta_y_bits, reserved;
+    nbdriver_u64 modified_events, copy_failures, missed;
+    nbdriver_u32 channels;
+    nbdriver_s32 error;
+};
+#define NBDRIVER_IOC_GYRO \
+    _IOWR(NBDRIVER_IOC_MAGIC, 0x2d, struct nbdriver_gyro_request)
+
 #endif /* NBDRIVER_ABI_H */
