@@ -130,6 +130,9 @@ restore:
     return -EFAULT;
 }
 
+/* Named assembly entry; strict kernel builds require its C prototype. */
+struct module *nbdriver_context_work_run(struct callback_head *head);
+
 __visible __used noinline struct module *nbdriver_context_work_run(struct callback_head *head)
 {
     struct context_event *event = container_of(head, struct context_event, work);
