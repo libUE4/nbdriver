@@ -399,38 +399,52 @@ static void nbdriver_touch_fill_locked(struct nbdriver_touch_snapshot *out)
 	}
 }
 
+struct nbdriver_touch_discovery {
+	const struct device_type *input_type;
+	struct input_dev *result;
+};
+
 static int nbdriver_touch_match_device(struct device *device, void *data)
 {
-	struct input_dev *dev = to_input_dev(device);
-	struct input_dev **result = data;
+	struct nbdriver_touch_discovery *discovery = data;
+	struct input_dev *dev;
 
-	if (!dev || !result || !nbdriver_touch_candidate(dev))
+	/*
+	 * input_class contains both input_dev and evdev/mousedev/joydev nodes.
+	 * Prove the embedded device's type before container_of: treating an
+	 * event node as input_dev reads outside its allocation and can panic
+	 * while interpreting unrelated bytes as dev->mt.
+	 */
+	if (!device || !discovery || !discovery->input_type ||
+	    device->type != discovery->input_type)
+		return 0;
+	dev = to_input_dev(device);
+	if (!nbdriver_touch_candidate(dev))
 		return 0;
 	if (!dev->mt || dev->mt->num_slots < 2 ||
 	    dev->mt->num_slots > NBDRIVER_TOUCH_SLOTS)
 		return 0;
 	/* class_for_each_device drops its iterator reference before returning. */
 	get_device(&dev->dev);
-	*result = dev;
+	discovery->result = dev;
 	return 1;
 }
 
 static struct input_dev *nbdriver_touch_find_device(void)
 {
-	struct input_dev *dev = NULL;
+	struct nbdriver_touch_discovery discovery = { 0 };
 	struct class *input_cls;
 
-	/* The kernel already owns the input class; enumerate it instead of opening
-	 * or creating an evdev node from userspace. */
 	input_cls = (struct class *)nbdriver_ksym_lookup_optional("input_class");
-	if (!input_cls)
+	discovery.input_type = (const struct device_type *)
+		nbdriver_ksym_lookup_optional("input_dev_type");
+	/* Missing type evidence must never fall back to a name/layout guess. */
+	if (!input_cls || !discovery.input_type)
 		return NULL;
-	/* This is a GPL-exported API. Import it normally: legacy CFI kernels
-	 * distinguish its kallsyms body from the callable CFI jump-table entry.
-	 * Casting the body to even the exact prototype still fails CFI. A direct
-	 * import also preserves the kernel's CFI check of our typed callback. */
-	class_for_each_device(input_cls, NULL, &dev, nbdriver_touch_match_device);
-	return dev;
+	/* Keep the GPL-exported call and the kernel's typed CFI callback check. */
+	class_for_each_device(input_cls, NULL, &discovery,
+		nbdriver_touch_match_device);
+	return discovery.result;
 }
 
 static unsigned int nbdriver_touch_physical_active_count(
