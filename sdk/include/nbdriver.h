@@ -435,6 +435,24 @@ struct nbdriver_fd_size_request {
 	nbdriver_u32 reserved;
 };
 
+/* Read-only Mali GET_GPUPROPS on the existing target FD. The native
+ * buffer/capacity/flags tuple is passed from this caller, never target memory.
+ * Result preserves the GPU syscall value; error is transport/identity failure.
+ * ABI 5 extension: older modules return ENOTTY. No KGSL capability required. */
+#define NBDRIVER_GPU_PROPERTIES_MAX (64U * 1024U)
+struct nbdriver_gpu_properties_request {
+ nbdriver_s32 pid, target_fd;
+ nbdriver_u64 expected_start_ns;
+ nbdriver_u64 buffer;
+ nbdriver_u32 capacity, flags;
+ nbdriver_s64 result;
+ nbdriver_u64 sample_ns;
+ nbdriver_s32 error;
+ nbdriver_u32 reserved;
+};
+#define NBDRIVER_IOC_GPU_PROPERTIES \
+ _IOWR(NBDRIVER_IOC_MAGIC, 0x2e, struct nbdriver_gpu_properties_request)
+
 /* Matches the 48-byte KGSL GPUOBJ_INFO payload; never expose kernel pointers. */
 struct nbdriver_gpu_object_info {
 	nbdriver_u64 gpu_address;
@@ -646,6 +664,34 @@ struct nbdriver_udp_read_request {
  * Mirrors nbdriver_abi.h. */
 #define NBDRIVER_FEATURE_PRINTK_VISIBILITY (1U << 30)
 
+
+/* Optional gyro extension: discover with STATUS (ENOTTY on older modules).
+ * ABI 5's 32 feature bits are already occupied; no existing bit is reused.
+ * Rates are finite IEEE-754 binary32 bits in rad/s, at most +/-1.
+ * The active lease belongs to this anonymous FD and exact process lifetime.
+ */
+#define NBDRIVER_GYRO_ABI_VERSION 1U
+#define NBDRIVER_GYRO_TYPE_CALIBRATED 1U
+#define NBDRIVER_GYRO_TYPE_UNCALIBRATED 2U
+#define NBDRIVER_GYRO_STATUS 0U
+#define NBDRIVER_GYRO_SET 1U
+#define NBDRIVER_GYRO_STOP 2U
+#define NBDRIVER_GYRO_AVAILABLE (1U << 0)
+#define NBDRIVER_GYRO_ACTIVE (1U << 1)
+#define NBDRIVER_GYRO_MAX_LEASE_MS 250U
+struct nbdriver_gyro_request {
+    nbdriver_u32 version, size, operation, flags;
+    nbdriver_s32 pid;
+    nbdriver_u32 lease_ms;
+    nbdriver_u64 expected_start_ns;
+    nbdriver_u32 type_mask, delta_x_bits, delta_y_bits, reserved;
+    nbdriver_u64 modified_events, copy_failures, missed;
+    nbdriver_u32 channels;
+    nbdriver_s32 error;
+};
+#define NBDRIVER_IOC_GYRO \
+    _IOWR(NBDRIVER_IOC_MAGIC, 0x2d, struct nbdriver_gyro_request)
+
 #endif /* NBDRIVER_ABI_H */
 
 #ifdef __cplusplus
@@ -658,7 +704,7 @@ extern "C" {
 extern long int syscall(long int number, ...) __THROW;
 #endif
 
-/* 内部结果：-2 是候选 miss，-1 是确定的驱动/ABI 错误，>=0 是已校验 FD。
+/* 内部结果：-2 是候选 miss 或协议不匹配，继续扫描；-1 是连接错误，>=0 是已校验 FD。
  * 扫描完成后才把未识别候选的可见权限/资源错误映射为最终 errno。
  * 原生 Android ARM64 引导序列，主机测试应 mock syscall，不能直接运行。 */
 static inline int nbdriver_bootstrap_try(unsigned int number, int *observed_error)
@@ -691,12 +737,21 @@ static inline int nbdriver_bootstrap_try(unsigned int number, int *observed_erro
         error = errno;
         close(fd);
         errno = error;
+        /* A legacy driver may share the bootstrap magic but not our ioctl
+         * protocol. Close its FD and keep looking for a validated peer. */
+        if (error == ENOTTY || error == EPROTO) {
+            if (!*observed_error)
+                *observed_error = error;
+            return -2;
+        }
         return -1;
     }
     if (info.version != NBDRIVER_ABI_VERSION || info.size != sizeof(info)) {
         close(fd);
+        if (!*observed_error)
+            *observed_error = EPROTO;
         errno = EPROTO;
-        return -1;
+        return -2;
     }
     errno = 0;
     return fd;
@@ -1123,6 +1178,21 @@ static inline int nbdriver_get_file_descriptor_size(int fd, int pid, int target_
 	return 0;
 }
 
+/* A zero capacity queries the required length. On successful transport,
+ * out->result is the signed native syscall result and sample_ns is nonzero. */
+static inline int nbdriver_get_gpu_properties(int fd, int pid, int target_fd,
+ nbdriver_u64 expected_start_ns, void *buffer, nbdriver_u32 capacity,
+ nbdriver_u32 flags, struct nbdriver_gpu_properties_request *out)
+{
+ if (!out) { errno = EINVAL; return -1; }
+ memset(out, 0, sizeof(*out));
+ if (fd < 0 || pid <= 0 || target_fd < 0 || capacity > NBDRIVER_GPU_PROPERTIES_MAX ||
+     (capacity && !buffer)) { errno = EINVAL; return -1; }
+ out->pid=pid;out->target_fd=target_fd;out->expected_start_ns=expected_start_ns;
+ out->buffer=(nbdriver_u64)(uintptr_t)buffer;out->capacity=capacity;out->flags=flags;
+ return ioctl(fd,NBDRIVER_IOC_GPU_PROPERTIES,out);
+}
+
 /* Return 0 when transport/validation succeeded; inspect out->result for the
  * actual KGSL return. Missing/unverified vendor backends return -1/errno. */
 static inline int nbdriver_read_gpu_object_info(int fd, int pid, int target_fd,
@@ -1378,6 +1448,73 @@ static inline int nbdriver_touch_virtual_destroy(int fd)
 	request.size = sizeof(request);
 	request.operation = NBDRIVER_TOUCH_VIRTUAL_DESTROY;
 	return nbdriver_touch_virtual(fd, &request);
+}
+
+
+static inline int nbdriver_gyro(int fd, struct nbdriver_gyro_request *request)
+{
+    if (!request) { errno = EINVAL; return -1; }
+    request->version = NBDRIVER_GYRO_ABI_VERSION;
+    request->size = sizeof(*request);
+    if (ioctl(fd, NBDRIVER_IOC_GYRO, request) < 0) return -1;
+    if (request->error) {
+        errno = request->error < 0 ? -request->error : EPROTO;
+        return -1;
+    }
+    return 0;
+}
+
+/* STATUS succeeds even when this optional backend is unavailable; inspect
+ * AVAILABLE. Older modules return ENOTTY. SET success proves configuration,
+ * not delivery: modified_events increases only after a complete packet send.
+ */
+static inline int nbdriver_gyro_status(int fd, struct nbdriver_gyro_request *out)
+{
+    struct nbdriver_gyro_request request;
+    int result;
+    memset(&request, 0, sizeof(request));
+    request.operation = NBDRIVER_GYRO_STATUS;
+    result = nbdriver_gyro(fd, &request);
+    if (out) *out = request;
+    return result;
+}
+
+static inline int nbdriver_gyro_set(int fd, int pid, nbdriver_u64 expected_start_ns,
+    float x_rad_per_sec, float y_rad_per_sec, unsigned type_mask,
+    unsigned lease_ms, struct nbdriver_gyro_request *out)
+{
+    struct nbdriver_gyro_request request;
+    int result;
+    if (pid <= 0 || !expected_start_ns || !type_mask || (type_mask & ~3U) ||
+        !lease_ms || lease_ms > NBDRIVER_GYRO_MAX_LEASE_MS ||
+        !(x_rad_per_sec >= -1.0f && x_rad_per_sec <= 1.0f) ||
+        !(y_rad_per_sec >= -1.0f && y_rad_per_sec <= 1.0f)) {
+        if (out) memset(out, 0, sizeof(*out));
+        errno = EINVAL;
+        return -1;
+    }
+    memset(&request, 0, sizeof(request));
+    request.operation = NBDRIVER_GYRO_SET;
+    request.pid = pid;
+    request.expected_start_ns = expected_start_ns;
+    request.lease_ms = lease_ms;
+    request.type_mask = type_mask;
+    memcpy(&request.delta_x_bits, &x_rad_per_sec, sizeof(float));
+    memcpy(&request.delta_y_bits, &y_rad_per_sec, sizeof(float));
+    result = nbdriver_gyro(fd, &request);
+    if (out) *out = request;
+    return result;
+}
+
+static inline int nbdriver_gyro_stop(int fd, struct nbdriver_gyro_request *out)
+{
+    struct nbdriver_gyro_request request;
+    int result;
+    memset(&request, 0, sizeof(request));
+    request.operation = NBDRIVER_GYRO_STOP;
+    result = nbdriver_gyro(fd, &request);
+    if (out) *out = request;
+    return result;
 }
 
 #ifdef __cplusplus

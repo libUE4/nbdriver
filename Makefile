@@ -10,7 +10,9 @@ LLVM_IAS ?= 1
 TUSI_NDK ?= $(HOME)/workspace/tusi-ndk/android-ndk-aide
 SMOKE_CC ?= clang-18
 TUSI_PREBUILT := $(TUSI_NDK)/toolchains/llvm/prebuilt/linux-arm
-SMOKE_OUTPUT ?= $(PROJECT_DIR)/tests/nbdriver_smoke
+TEST_DIR ?= /tmp/nbg-work/nbdriver/tests
+TEST_OUTPUT ?= /tmp/nbg-work/nbdriver/build
+SMOKE_OUTPUT ?= $(TEST_OUTPUT)/nbdriver_smoke
 
 MODULE ?= $(PROJECT_DIR)/src/nbdriver.ko
 
@@ -36,6 +38,7 @@ all: check-source check-kdir
 verify-module: check-kdir
 	python3 "$(PROJECT_DIR)/tools/check_undefined.py" --symvers "$(KDIR)/Module.symvers" --module "$(MODULE)"
 	python3 "$(PROJECT_DIR)/tools/check_callback_tail.py" --module "$(MODULE)"
+	python3 "$(PROJECT_DIR)/tools/check_cfi_boundaries.py" --module "$(MODULE)"
 
 smoke:
 	mkdir -p "$(dir $(SMOKE_OUTPUT))"
@@ -45,19 +48,19 @@ smoke:
 		-rtlib=compiler-rt -fuse-ld=lld -std=c11 -D_GNU_SOURCE -lm \
 		-O2 -Wall -Wextra -Werror -pthread -Wl,-z,max-page-size=16384 \
 		-I"$(PROJECT_DIR)/sdk/include" \
-	"$(PROJECT_DIR)/tests/nbdriver_smoke.c" "$(PROJECT_DIR)/sdk/src/client.c" \
+	"$(TEST_DIR)/nbdriver_smoke.c" "$(PROJECT_DIR)/sdk/src/client.c" \
 	-o "$(SMOKE_OUTPUT)"
 
 touch-virtual-test:
-	mkdir -p "$(dir $(PROJECT_DIR)/tests/touch_virtual_test)"
+	mkdir -p "$(dir $(TEST_OUTPUT)/touch_virtual_test)"
 	$(SMOKE_CC) --target=aarch64-linux-android21 \
 		--sysroot="$(TUSI_PREBUILT)/sysroot" \
 		-resource-dir="$(TUSI_PREBUILT)/lib/clang/21" \
 		-rtlib=compiler-rt -fuse-ld=lld -std=c11 -D_GNU_SOURCE -lm \
 		-O2 -Wall -Wextra -Werror -pthread -Wl,-z,max-page-size=16384 \
 		-I"$(PROJECT_DIR)/sdk/include" \
-		"$(PROJECT_DIR)/tests/touch_virtual_test.c" \
-		-o "$(PROJECT_DIR)/tests/touch_virtual_test"
+		"$(TEST_DIR)/touch_virtual_test.c" \
+		-o "$(TEST_OUTPUT)/touch_virtual_test"
 
 loader:
 	mkdir -p "$(dir $(LOADER_OUTPUT))"
@@ -73,4 +76,4 @@ clean: check-source check-kdir
 
 help:
 	@echo "make [all|loader|clean] KDIR=/path/to/kernel/build [ARCH=arm64 LLVM=1 LLVM_IAS=1]"
-	@echo "make smoke [TUSI_NDK=/path/to/android-ndk-aide SMOKE_CC=clang-18 SMOKE_OUTPUT=tests/nbdriver_smoke]"
+	@echo "make smoke [TUSI_NDK=/path/to/android-ndk-aide SMOKE_CC=clang-18 TEST_DIR=/tmp/nbg-work/nbdriver/tests SMOKE_OUTPUT=/tmp/nbg-work/nbdriver/build/nbdriver_smoke]"

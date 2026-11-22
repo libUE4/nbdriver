@@ -28,6 +28,7 @@
 #include "nbdriver_sf_groups.h"
 #include "nbdriver_udp.h"
 #include "nbdriver_touch.h"
+#include "nbdriver_gyro.h"
 
 static int __init nbdriver_init(void)
 {
@@ -50,6 +51,9 @@ static int __init nbdriver_init(void)
 		nbd_err("stage=module_init dependency=touch error=%d\n", ret);
 		goto err_ksym;
 	}
+
+	/* Optional: absent sensor hook must not disable touch or process reads. */
+	nbdriver_gyro_init();
 
 	ret = nbdriver_cfi_init();
 	if (ret) {
@@ -108,6 +112,7 @@ err_read:
 err_cfi:
 	nbdriver_cfi_exit();
 err_touch:
+	nbdriver_gyro_exit();
 	nbdriver_touch_exit();
 err_ksym:
 	nbdriver_ksym_exit();
@@ -126,6 +131,7 @@ static void __exit nbdriver_exit(void)
 	nbdriver_query_exit();
 	nbdriver_read_exit();
 	nbdriver_cfi_exit();
+	nbdriver_gyro_exit();
 	nbdriver_touch_exit();
 	nbdriver_ksym_exit();
 	nbdriver_comm_exit();
@@ -172,10 +178,13 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 	    command != NBDRIVER_IOC_RUNTIME_STATUS &&
 	    command != NBDRIVER_IOC_RUNTIME_CONTROL &&
 	    command != NBDRIVER_IOC_UDP_STOP &&
-	    command != NBDRIVER_IOC_UDP_STATUS)
+	    command != NBDRIVER_IOC_UDP_STATUS &&
+	    command != NBDRIVER_IOC_GYRO)
 		return -ESHUTDOWN;
 
 	switch (command) {
+	case NBDRIVER_IOC_GYRO:
+		return nbdriver_gyro_ioctl(file, argument);
 	case NBDRIVER_IOC_UDP_START:
 	case NBDRIVER_IOC_UDP_READ:
 	case NBDRIVER_IOC_UDP_STOP:
@@ -189,6 +198,7 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 	case NBDRIVER_IOC_GPU_SYNC:
 	case NBDRIVER_IOC_GPU_VISIBILITY:
 	case NBDRIVER_IOC_GPU_INFO:
+	case NBDRIVER_IOC_GPU_PROPERTIES:
 	case NBDRIVER_IOC_RANDOM:
 		return nbdriver_metadata_ioctl(command, argument);
 	case NBDRIVER_IOC_DEVPTS_STATUS:
@@ -258,6 +268,7 @@ static int nbdriver_comm_release(struct inode *inode, struct file *file)
 {
 	(void)inode;
 	/* A dead client must never leave a synthetic contact pressed. */
+	nbdriver_gyro_release(file);
 	nbdriver_touch_release(file);
 	nbdriver_udp_release(file);
 	return 0;

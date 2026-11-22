@@ -428,6 +428,24 @@ struct nbdriver_fd_size_request {
 	nbdriver_u32 reserved;
 };
 
+/* Read-only Mali GET_GPUPROPS on the existing target FD. The native
+ * buffer/capacity/flags tuple is passed from this caller, never target memory.
+ * Result preserves the GPU syscall value; error is transport/identity failure.
+ * ABI 5 extension: older modules return ENOTTY. No KGSL capability required. */
+#define NBDRIVER_GPU_PROPERTIES_MAX (64U * 1024U)
+struct nbdriver_gpu_properties_request {
+ nbdriver_s32 pid, target_fd;
+ nbdriver_u64 expected_start_ns;
+ nbdriver_u64 buffer;
+ nbdriver_u32 capacity, flags;
+ nbdriver_s64 result;
+ nbdriver_u64 sample_ns;
+ nbdriver_s32 error;
+ nbdriver_u32 reserved;
+};
+#define NBDRIVER_IOC_GPU_PROPERTIES \
+ _IOWR(NBDRIVER_IOC_MAGIC, 0x2e, struct nbdriver_gpu_properties_request)
+
 /* Matches the 48-byte KGSL GPUOBJ_INFO payload; never expose kernel pointers. */
 struct nbdriver_gpu_object_info {
 	nbdriver_u64 gpu_address;
@@ -645,5 +663,33 @@ struct nbdriver_udp_read_request {
  * enters the printk ring buffer. Selectively narrow: unlike dmesg_restrict it
  * leaves the kernel log readable for every other consumer. */
 #define NBDRIVER_FEATURE_PRINTK_VISIBILITY (1U << 30)
+
+
+/* Optional gyro extension: discover with STATUS (ENOTTY on older modules).
+ * ABI 5's 32 feature bits are already occupied; no existing bit is reused.
+ * Rates are finite IEEE-754 binary32 bits in rad/s, at most +/-1.
+ * The active lease belongs to this anonymous FD and exact process lifetime.
+ */
+#define NBDRIVER_GYRO_ABI_VERSION 1U
+#define NBDRIVER_GYRO_TYPE_CALIBRATED 1U
+#define NBDRIVER_GYRO_TYPE_UNCALIBRATED 2U
+#define NBDRIVER_GYRO_STATUS 0U
+#define NBDRIVER_GYRO_SET 1U
+#define NBDRIVER_GYRO_STOP 2U
+#define NBDRIVER_GYRO_AVAILABLE (1U << 0)
+#define NBDRIVER_GYRO_ACTIVE (1U << 1)
+#define NBDRIVER_GYRO_MAX_LEASE_MS 250U
+struct nbdriver_gyro_request {
+    nbdriver_u32 version, size, operation, flags;
+    nbdriver_s32 pid;
+    nbdriver_u32 lease_ms;
+    nbdriver_u64 expected_start_ns;
+    nbdriver_u32 type_mask, delta_x_bits, delta_y_bits, reserved;
+    nbdriver_u64 modified_events, copy_failures, missed;
+    nbdriver_u32 channels;
+    nbdriver_s32 error;
+};
+#define NBDRIVER_IOC_GYRO \
+    _IOWR(NBDRIVER_IOC_MAGIC, 0x2d, struct nbdriver_gyro_request)
 
 #endif /* NBDRIVER_ABI_H */
