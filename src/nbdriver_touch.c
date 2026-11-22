@@ -27,9 +27,6 @@
 #define NBDRIVER_TOUCH_VIRTUAL_MAX 4U
 #define NBDRIVER_TOUCH_WATCHDOG_MS 500U
 
-/* Preserve the target KMI's exact prototype, including const qualifiers.
- * A handwritten near-match has a different KCFI type and panics at init. */
-typedef __typeof__(&class_for_each_device) nbdriver_class_for_each_device_fn;
 typedef void (*nbdriver_input_handle_event_fn)(struct input_dev *,
 	unsigned int, unsigned int, int);
 static nbdriver_input_handle_event_fn nbdriver_touch_handle_event;
@@ -421,17 +418,18 @@ static int nbdriver_touch_match_device(struct device *device, void *data)
 static struct input_dev *nbdriver_touch_find_device(void)
 {
 	struct input_dev *dev = NULL;
-	nbdriver_class_for_each_device_fn for_each_device;
 	struct class *input_cls;
 
 	/* The kernel already owns the input class; enumerate it instead of opening
 	 * or creating an evdev node from userspace. */
-	for_each_device = (nbdriver_class_for_each_device_fn)
-		nbdriver_ksym_lookup_optional("class_for_each_device");
 	input_cls = (struct class *)nbdriver_ksym_lookup_optional("input_class");
-	if (!for_each_device || !input_cls)
+	if (!input_cls)
 		return NULL;
-	for_each_device(input_cls, NULL, &dev, nbdriver_touch_match_device);
+	/* This is a GPL-exported API. Import it normally: legacy CFI kernels
+	 * distinguish its kallsyms body from the callable CFI jump-table entry.
+	 * Casting the body to even the exact prototype still fails CFI. A direct
+	 * import also preserves the kernel's CFI check of our typed callback. */
+	class_for_each_device(input_cls, NULL, &dev, nbdriver_touch_match_device);
 	return dev;
 }
 

@@ -28,4 +28,6 @@ int nbdriver_udp_capture_read(int fd, struct nbdriver_udp_packet *packets,
 int nbdriver_udp_capture_status(int fd, struct nbdriver_udp_status *out);
 int nbdriver_udp_capture_stop(int fd);
 
+int nbdriver_hwbp(int fd, struct nbdriver_hwbp_request *request);
+
 #endif /* NBDRIVER_CLIENT_H */

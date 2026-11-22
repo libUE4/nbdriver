@@ -233,3 +233,29 @@ int nbdriver_udp_capture_stop(int fd)
     if (fd < 0) { errno = EINVAL; return -1; }
     return ioctl(fd, NBDRIVER_IOC_UDP_STOP, 0);
 }
+
+/* Optional raw-register capture. Start from a zeroed request; INFO is
+ * supported discovery, ENOTTY means an older driver. READ is nondestructive:
+ * preserve after_sequence only after a successful call. Close clears ownership.
+ */
+int nbdriver_hwbp(int fd, struct nbdriver_hwbp_request *request)
+{
+    unsigned int operation, capacity;
+    int result;
+    if (fd < 0 || !request) { errno = EINVAL; return -1; }
+    operation = request->operation;
+    capacity = request->capacity;
+    request->version = NBDRIVER_HWBP_ABI_VERSION;
+    request->size = sizeof(*request);
+    result = ioctl(fd, NBDRIVER_IOC_HWBP, request);
+    if (result < 0) return -1;
+    if (request->version != NBDRIVER_HWBP_ABI_VERSION ||
+        request->size != sizeof(*request) || request->operation != operation ||
+        request->error ||
+        (operation == NBDRIVER_HWBP_READ && request->count > capacity) ||
+        (operation == NBDRIVER_HWBP_ADD && !request->handle)) {
+        errno = EPROTO; return -1;
+    }
+    return 0;
+}
+

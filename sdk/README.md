@@ -56,7 +56,7 @@ FD 从用户输出参数获取；只有 GET_ABI 版本/大小校验通过才返�
 它不验证每项能力或 runtime READY，调用方按需另查。
 
 输出哨兵未变表示候选未识别；普通候选的 EINVAL/EBADF/EFAULT 不作为驱动确定错误。
-驱动回写的负 errno 和 ABI 失败立即返回；全部候选 miss 后优先保留可见的权限/资源类错误，
+驱动回写的负 errno、ABI 查询的权限或资源错误立即返回。候选 FD 返回 ENOTTY/EPROTO 或 ABI 版本、大小不匹配时，关闭该 FD 并继续扫描，兼容同魔数旧驱动共存；全部候选 miss 后保留已观察到的错误，
 否则 ENODEV。版本/结构失配为 EPROTO。错误分层见[通信机制](../docs/communication.md)。
 
 大多数包装成功返回 0、失败 -1/errno，但以下返回值不同：
@@ -106,9 +106,14 @@ batch.completed 是完整成功项数，不是字节数。全局错误为 -1/err
 | `nbdriver_query_mapping` | 瞬时物理 RAM 叶项和 VMA 权限；冷页 ENODATA，不是 GPU VA 翻译 |
 | `nbdriver_get_file_descriptor_size` | 目标 FD 的 VFS size，不等同 GPU 对象大小 |
 | `nbdriver_read_gpu_object_info` | 传输成功仍查 out.result / sample_ns；结果体为 out.info |
+| `nbdriver_get_gpu_properties` | Mali GET_GPUPROPS；capacity=0 查真实长度，最多64 KiB；检查 result/sample_ns，旧模块返回 ENOTTY |
 | `nbdriver_get_gpu_syncsources` | 有界 IDR 占用观察，最多 4096 ID，first_free 不是资源预留；失败查 fail_stage/error |
 | `nbdriver_gpu_visibility` / `nbdriver_hide_gpu_process` / `nbdriver_show_gpu_process` | 可撤销的目标可见性状态；共用 PID 身份的 proc 功能另有能力位 |
 | `nbdriver_read_random` | 最多 64 字节，返回实际字节数 |
+
+Mali 属性通过目标已打开的 FD 查询，只允许经符号身份核验的 kbase file_operations。
+查询写入调用方缓冲区，不改变目标内存、文件位置或 GPU 上下文；不依赖 KGSL 能力位。
+0x2e 是 ABI 5 的可选扩展；无法验证厂商后端时返回 EOPNOTSUPP，不补造属性。
 
 KGSL 可选后端需验证 FD、模块归属和实现布局；能力位不保证所有厂商实现支持。
 可见性过滤不删除厂商节点、不等于模块隐藏；没有单独的 PROC_VISIBILITY ioctl。
@@ -154,8 +159,8 @@ usercopy 失败保留可重试记录，消费者可按 generation+sequence 去�
 
 ## 检查
 
-当前 `tests/` 仅保留 `nbdriver_smoke.c`。旧 test_single_header.py、test_readv.py 等脚本已清理，
-历史文档中的旧命令不能直接作为当前操作步骤。使用当前构建和语法检查：
+本地测试源码和结果统一放在 `/tmp/nbg-work/nbdriver/`；`make smoke` 和
+`make touch-virtual-test` 输出也位于该临时目录。正式源码保留以下 SDK 语法检查：
 
 ```sh
 cc -std=c11 -Wall -Wextra -Werror -Isdk/include -include nbdriver_abi.h -x c -fsyntax-only /dev/null
@@ -164,5 +169,101 @@ c++ -std=c++17 -Wall -Wextra -Werror -Isdk/include -include nbdriver.h -x c++ -f
 cc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror -Isdk/include -fsyntax-only sdk/src/client.c
 ```
 
-完整编译、ABI 镜像核对和实测边界见[测试说明](../docs/testing.md)。本次只补说明和注释，
-不把旧测试日志写成当前源码的完整设备验证。
+测试记录保存在项目外的临时目录，不能把历史日志当作当前源码的设备验证。
+
+
+## 陀螺仪控制（可选扩展）
+
+使用 `nbdriver_gyro_status` 查询 `NBDRIVER_GYRO_AVAILABLE`。ABI 5 的既有
+32 位能力掩码不改动；旧模块会返回 `ENOTTY`，不可当作支持。控制请求使用独立
+`NBDRIVER_IOC_GYRO`（0x2d），请求版本 1、大小 80 字节。
+
+`nbdriver_gyro_set(fd, pid, start_ns, x, y, type_mask, lease_ms, &status)` 设置
+X/Y 附加角速度，单位 rad/s，每轴有限值范围 [-1,1]。type_mask 为 1（校准）、
+2（未校准）或 3（两者）。PID 必须绑定实际启动时间，不能传零跳过身份校验。
+租约范围 1–250 ms，建议 100 ms；开启期间持续刷新。`nbdriver_gyro_stop` 停止，
+最终关闭所有 dup 的 FD、QUIESCE、模块卸载也清理会话。到期不再改写新数据包。
+启用前游戏须已打开传感器通道；无候选通道返回 ENODATA，调用方按需重试。
+
+实现只处理 system_server 发往该进程当前持有的 AF_UNIX SOCK_SEQPACKET 通道、
+非阻塞发送中的标准 104 字节传感器事件，最多每批 1000 条。绑定文件对象、FD、
+进程启动身份和 mm；关闭替换的 FD 或 exec 不继承旧绑定。只在私有内核发送副本
+上附加 X/Y，不改源缓冲区、游戏内存、Z、未校准偏置、时间戳或其他类型事件。
+候选 FD 扫描限 16384、通道限 64，超过返回 E2BIG，不任意截断绑定。
+
+`SET` 成功只代表配置接受；`modified_events` 仅在整包实际发送成功后增加。
+`copy_failures` 表示无故障复制或私有缓冲池申请失败；`missed` 是 kretprobe
+实例不足的内核累计值，可能包含其他 Unix 调用，不能当作游戏丢包数。
+复制失败、超大批次、未知格式和不匹配通道原样通过，不丢弃游戏数据。
+内核不做浮点运算，采用参考驱动的 Q32.32 转换。未刷新或失效会话停止输出。
+该接口输出传感器附加角速度，屏幕旋转、触发、选靶和轴向校准属于调用方。
+
+内核后端注册失败只禁用陀螺仪，既有触摸、读取和 UDP 不受其初始化结果影响。
+传感器 direct-channel/shared-memory 路径不经过此后端；应以事件计数和设备行为验收，
+不能仅凭 AVAILABLE 或 SET 成功声称设备已生效。
+
+稳定会话每 500 ms 复核一次候选通道；字段未变化时复用同一绑定，不清零角速度。
+扫描、会话变更和停止可包含 RCU 同步，调用方应放在控制线程，避免放进绘制回调。
+
+## 原始硬件执行断点与观察点
+
+单头和编译型 SDK 均提供 `nbdriver_hwbp(fd, &request)`。该可选扩展通过
+`NBDRIVER_HWBP_INFO` 查询；旧驱动返回 ENOTTY。未占用或重解释既有 feature 位。
+内核实现从旧 NBG-driver 移植直接寄存器配置、异常分发和调度恢复思路，
+没有 perf 注册、事件分配或 perf 槽位接口。执行槽为 BVR/BCR 2–5，观察槽为
+WVR/WCR 0–3；实际数量还受硬件限制，INFO 返回的数量不是空闲槽保证。
+遇到已启用且不属于本后端的物理配置，返回或记录 EBUSY，不覆盖其他调试器。
+
+此接口是单次现场采集：命中后先解除对应槽位，PC 保持不变，让原指令重试。
+`REARM` 显式要求下一次采集，不承诺记录两次布置之间的执行或访问。
+它不是原版指令替代回调的 `PC += 4` 模式，也不是暂停/继续式调试器。
+没有自动延迟重装、目标代码修改或 FPSIMD 写入。记录包含命中前的
+X0–X30、PC、SP、PSTATE、实际线程和时间，不包含 Q 寄存器。
+
+所有操作要求 CAP_SYS_PTRACE。ADD 必须传非零进程启动时间；`tid=0` 为整个
+线程组，非零为指定线程。指定子线程还必须传对应线程启动时间。
+绑定保存 task/mm 引用，PID 复用和 exec 不继承旧绑定。执行断点要求
+4 字节对齐且 length=4；观察点 length 为 1/2/4/8，不能跨越 8 字节颗粒。
+type 为 R=1、W=2、RW=3、X=4，与旧 raw API 对齐。
+
+```c
+struct nbdriver_hwbp_request req = {0};
+req.operation = NBDRIVER_HWBP_INFO;
+if (nbdriver_hwbp(fd, &req) < 0) { /* errno 给出实际失败 */ }
+
+/* pid/start_ns/address 来自调用方已经确认的目标身份及地址。 */
+memset(&req, 0, sizeof(req));
+req.operation = NBDRIVER_HWBP_ADD;
+req.pid = pid;
+req.expected_start_ns = start_ns;
+req.address = address;
+req.type = NBDRIVER_HWBP_X;
+req.length = 4;
+if (nbdriver_hwbp(fd, &req) == 0) {
+    uint64_t handle = req.handle;
+    struct nbdriver_hwbp_record records[16];
+    memset(&req, 0, sizeof(req));
+    req.operation = NBDRIVER_HWBP_READ;
+    req.handle = handle;
+    req.records = (uint64_t)(uintptr_t)records;
+    req.capacity = 16;
+    /* 非阻塞；count=0 表示尚无命中。成功后保存 after_sequence 供下次读取。 */
+    if (nbdriver_hwbp(fd, &req) == 0) { /* 消费 req.count 条记录 */ }
+    memset(&req, 0, sizeof(req));
+    req.operation = NBDRIVER_HWBP_REMOVE;
+    req.handle = handle;
+    nbdriver_hwbp(fd, &req);
+}
+```
+
+REARM 已布置的槽位返回 EALREADY；目标失效返回 ESTALE。READ 按 sequence
+非破坏性读取最近 64 条记录，用户复制失败不消费记录；dropped 表示已被覆盖
+的历史总数。观察点 FAR 不精确时保留真实 FAR 并标记 IMPRECISE，不将其冒充
+精确访问地址。内核 uaccess 触发的观察点也必须解除以免原指令反复异常，此时
+记录标记 KERNEL_ACCESS，不能把内核现场当作用户态现场。
+
+REMOVE/CLEAR 只操作当前匿名 FD 所有的槽位；最终关闭该 FD、QUIESCE 和卸载
+会同步清理。QUIESCE 后 INFO/READ/REMOVE/CLEAR 可用，ADD/REARM 返回 ESHUTDOWN；
+恢复不会自动重新建立旧断点。安装、重布置、删除和清理可包含同步 IPI/RCU，
+应在控制线程调用。switch_missed 是调度返回探针实例不足的累计值，非目标漏采
+次数证明；原始寄存器后端的跨设备能力仍须以相应内核实际加载和命中验收。

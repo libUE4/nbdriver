@@ -28,6 +28,8 @@
 #include "nbdriver_sf_groups.h"
 #include "nbdriver_udp.h"
 #include "nbdriver_touch.h"
+#include "nbdriver_gyro.h"
+#include "nbdriver_hwbp.h"
 
 static int __init nbdriver_init(void)
 {
@@ -50,6 +52,9 @@ static int __init nbdriver_init(void)
 		nbd_err("stage=module_init dependency=touch error=%d\n", ret);
 		goto err_ksym;
 	}
+
+	/* Optional: absent sensor hook must not disable touch or process reads. */
+	nbdriver_gyro_init();
 
 	ret = nbdriver_cfi_init();
 	if (ret) {
@@ -77,6 +82,7 @@ static int __init nbdriver_init(void)
 	if (ret)
 		goto err_metadata;
 	nbdriver_udp_init();
+	nbdriver_hwbp_init();
 
 	ret = nbdriver_runtime_init();
 	if (ret) {
@@ -97,6 +103,7 @@ static int __init nbdriver_init(void)
 err_runtime:
 	nbdriver_runtime_exit();
 err_devpts:
+	nbdriver_hwbp_exit();
 	nbdriver_udp_exit();
 	nbdriver_devpts_exit();
 err_metadata:
@@ -108,6 +115,7 @@ err_read:
 err_cfi:
 	nbdriver_cfi_exit();
 err_touch:
+	nbdriver_gyro_exit();
 	nbdriver_touch_exit();
 err_ksym:
 	nbdriver_ksym_exit();
@@ -120,12 +128,14 @@ static void __exit nbdriver_exit(void)
 {
 	nbdriver_runtime_exit();
 	nbdriver_entry_exit();
+	nbdriver_hwbp_exit();
 	nbdriver_devpts_exit();
 	nbdriver_udp_exit();
 	nbdriver_metadata_exit();
 	nbdriver_query_exit();
 	nbdriver_read_exit();
 	nbdriver_cfi_exit();
+	nbdriver_gyro_exit();
 	nbdriver_touch_exit();
 	nbdriver_ksym_exit();
 	nbdriver_comm_exit();
@@ -172,10 +182,16 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 	    command != NBDRIVER_IOC_RUNTIME_STATUS &&
 	    command != NBDRIVER_IOC_RUNTIME_CONTROL &&
 	    command != NBDRIVER_IOC_UDP_STOP &&
-	    command != NBDRIVER_IOC_UDP_STATUS)
+	    command != NBDRIVER_IOC_UDP_STATUS &&
+	    command != NBDRIVER_IOC_GYRO &&
+	    command != NBDRIVER_IOC_HWBP)
 		return -ESHUTDOWN;
 
 	switch (command) {
+	case NBDRIVER_IOC_HWBP:
+		return nbdriver_hwbp_ioctl(file, argument);
+	case NBDRIVER_IOC_GYRO:
+		return nbdriver_gyro_ioctl(file, argument);
 	case NBDRIVER_IOC_UDP_START:
 	case NBDRIVER_IOC_UDP_READ:
 	case NBDRIVER_IOC_UDP_STOP:
@@ -189,6 +205,7 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 	case NBDRIVER_IOC_GPU_SYNC:
 	case NBDRIVER_IOC_GPU_VISIBILITY:
 	case NBDRIVER_IOC_GPU_INFO:
+	case NBDRIVER_IOC_GPU_PROPERTIES:
 	case NBDRIVER_IOC_RANDOM:
 		return nbdriver_metadata_ioctl(command, argument);
 	case NBDRIVER_IOC_DEVPTS_STATUS:
@@ -258,6 +275,8 @@ static int nbdriver_comm_release(struct inode *inode, struct file *file)
 {
 	(void)inode;
 	/* A dead client must never leave a synthetic contact pressed. */
+	nbdriver_hwbp_release(file);
+	nbdriver_gyro_release(file);
 	nbdriver_touch_release(file);
 	nbdriver_udp_release(file);
 	return 0;
@@ -938,6 +957,9 @@ int nbdriver_query_init(void)
 		nbdriver_ksym_lookup("task_call_func");
 	query_lock_sighand = (__typeof__(query_lock_sighand))
 		nbdriver_ksym_lookup_optional("__lock_task_sighand");
+	nbd_info("stage=thread_environment backend=%s fp=%u\n",
+		 query_task_call ? "task_call_func" : "blocked_task_or_ipi",
+		 query_task_call != NULL);
 	return query_access ? 0 : -ENOENT;
 }
 
@@ -952,9 +974,9 @@ u32 nbdriver_query_features(void)
 {
 	return NBDRIVER_FEATURE_FIND_PROCESS | NBDRIVER_FEATURE_MODULE_BASE |
 		NBDRIVER_FEATURE_PROCESS_ID | NBDRIVER_FEATURE_THREAD_ID |
+		NBDRIVER_FEATURE_THREAD_ENV |
 		(query_lock_sighand ? NBDRIVER_FEATURE_THREAD_SIGNAL : 0) |
-		(query_task_call ? NBDRIVER_FEATURE_THREAD_ENV |
-		 NBDRIVER_FEATURE_THREAD_FP : 0);
+		(query_task_call ? NBDRIVER_FEATURE_THREAD_FP : 0);
 }
 
 static noinline bool NBDRIVER_NO_CFI query_may_access(struct task_struct *task)
@@ -1307,6 +1329,38 @@ static void query_environment_ipi(void *argument)
 		query_environment_sample(current, sample->req) : -EAGAIN;
 }
 
+/* The blocked-task branch of task_call_func needs only pi_lock. Reject
+ * runnable, waking or still-switching tasks rather than borrowing rq internals.
+ * A running task is sampled separately on its own CPU after releasing pi_lock.
+ */
+static int query_environment_blocked(struct task_struct *task,
+				     struct nbdriver_thread_environment *req)
+{
+	unsigned long flags;
+	unsigned int state;
+	int ret = -EAGAIN;
+
+	raw_spin_lock_irqsave(&task->pi_lock, flags);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
+	state = READ_ONCE(task->__state);
+#else
+	state = READ_ONCE(task->state);
+#endif
+	if (state == TASK_RUNNING || state == TASK_WAKING)
+		goto unlock;
+	smp_rmb(); /* Observe on_rq only after the sleeping state. */
+	if (READ_ONCE(task->on_rq))
+		goto unlock;
+#ifdef CONFIG_SMP
+	if (smp_load_acquire(&task->on_cpu))
+		goto unlock;
+#endif
+	ret = query_environment_sample(task, req);
+unlock:
+	raw_spin_unlock_irqrestore(&task->pi_lock, flags);
+	return ret;
+}
+
 static noinline int NBDRIVER_NO_CFI
 query_environment_call(struct task_struct *task,
 		       struct nbdriver_thread_environment *req)
@@ -1320,12 +1374,11 @@ query_environment_call(struct task_struct *task,
 		preempt_enable();
 		return ret;
 	}
-	if (!query_task_call)
-		return -EOPNOTSUPP;
 	for (attempt = 0; attempt < 3; ++attempt) {
 		struct query_environment_ipi_sample sample = {task, req, -EAGAIN};
 
-		ret = query_task_call(task, query_environment_sample, req);
+		ret = query_task_call ? query_task_call(task, query_environment_sample, req) :
+			query_environment_blocked(task, req);
 		if (ret != -EAGAIN)
 			return ret;
 		/* task_call_func has released all scheduling locks before this
