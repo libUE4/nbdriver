@@ -92,6 +92,7 @@ jobs:
                 --symvers "$KERNEL_SRC/Module.symvers" \
                 --module src/nbdriver.ko \
                 --kmi "$KMI"
+              python3 tools/check_percpu.py --module src/nbdriver.ko
               python3 tools/check_callback_tail.py --module src/nbdriver.ko
               python3 tools/check_cfi_boundaries.py --module src/nbdriver.ko \
                 --output "out/cfi-boundaries-${KMI}.json"

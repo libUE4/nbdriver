@@ -36,6 +36,7 @@ all: check-source check-kdir
 # Do not publish a successful link until target exports and the actual callback
 # have passed the same checks used by CI. A stale .ko is not a release artifact.
 verify-module: check-kdir
+	python3 "$(PROJECT_DIR)/tools/check_percpu.py" --module "$(MODULE)"
 	python3 "$(PROJECT_DIR)/tools/check_undefined.py" --symvers "$(KDIR)/Module.symvers" --module "$(MODULE)"
 	python3 "$(PROJECT_DIR)/tools/check_callback_tail.py" --module "$(MODULE)"
 	python3 "$(PROJECT_DIR)/tools/check_cfi_boundaries.py" --module "$(MODULE)"
