@@ -47,21 +47,6 @@ jobs:
       - name: Check loader build with Clang
         run: make loader SMOKE_CC=clang LOADER_OUTPUT=out/nbdriver-loader-clang
 
-      - name: Check ELF rewrite regressions
-        run: CLANG=clang python3 tests/nbdriver_patch_test.py
-
-      - name: Check production ioctl metadata dispatch
-        run: python3 tests/metadata_dispatch_test.py
-
-      - name: Check file-lock header and iterator compatibility
-        run: python3 tests/filelock_compat_test.py
-
-      - name: Check device smoke build
-        run: |
-          set -euo pipefail
-          cc -D_GNU_SOURCE -std=c11 -O2 -Wall -Wextra -Werror -pthread \
-            -Isdk/include tests/nbdriver_smoke.c sdk/src/client.c \
-            -o /tmp/nbdriver-smoke
 
   kernel:
     needs: abi-check

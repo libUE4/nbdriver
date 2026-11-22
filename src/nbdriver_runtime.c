@@ -17,6 +17,7 @@
 #include "nbdriver_entry.h"
 #include "nbdriver_runtime.h"
 #include "nbdriver_udp.h"
+#include "nbdriver_gyro.h"
 
 struct nbdriver_runtime_state {
 	u64 handle;
@@ -120,8 +121,10 @@ long nbdriver_runtime_control_ioctl(unsigned long argument)
 	/* Never acquire UDP control lock while holding runtime_lock: START
 	 * rechecks quiescence under the opposite lock. Drain callbacks before
 	 * returning, even when copying the control reply subsequently fails. */
-	if (!ret && control.command == NBDRIVER_RUNTIME_CONTROL_QUIESCE)
+	if (!ret && control.command == NBDRIVER_RUNTIME_CONTROL_QUIESCE) {
 		nbdriver_udp_quiesce();
+		nbdriver_gyro_quiesce();
+	}
 	if (copy_to_user((void __user *)argument, &control, sizeof(control)))
 		return -EFAULT;
 	return ret;
