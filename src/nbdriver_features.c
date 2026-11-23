@@ -2388,8 +2388,10 @@ int nbdriver_mapping_locked(struct vm_area_struct *vma, unsigned long address,
 
 /* ===== BEGIN src/features/nbdriver_devpts.c ===== */
 // SPDX-License-Identifier: GPL-2.0-only
-/* Automatically discover the two exact argv[0] names. The immutable snapshot
- * holds PID + mm identities; neither PID reuse nor exec inherits a match. */
+/* Automatically discover the exact argv[0] names. DFM regional packages share
+ * status slot 0; RMCN retains slot 1 in the existing two-slot status ABI.
+ * The immutable snapshot holds PID + mm identities; neither PID reuse nor exec
+ * inherits a match. */
 #include <linux/atomic.h>
 #include <linux/capability.h>
 #include <linux/dcache.h>
@@ -2418,8 +2420,14 @@ int nbdriver_mapping_locked(struct vm_area_struct *vma, unsigned long address,
 #define NBDRIVER_DEVPTS_SLAVE_MAJOR 136U
 #define NBDRIVER_DEVPTS_SCAN_DELAY msecs_to_jiffies(500)
 
-static const char *const nbdriver_devpts_packages[] = {
-	"com.tencent.tmgp.dfm", "com.tencent.rmcn",
+static const struct {
+	const char *name;
+	u32 status_index;
+} nbdriver_devpts_packages[] = {
+	{ "com.tencent.tmgp.dfm", 0 },
+	{ "com.tencent.rmcn", 1 },
+	{ "com.garena.game.df", 0 },
+	{ "com.proxima.dfm", 0 },
 };
 
 struct nbdriver_devpts_target {
@@ -2451,8 +2459,8 @@ static int nbdriver_devpts_package_index(const char *name)
 	u32 i;
 
 	for (i = 0; i < ARRAY_SIZE(nbdriver_devpts_packages); ++i)
-		if (!strcmp(name, nbdriver_devpts_packages[i]))
-			return (int)i;
+		if (!strcmp(name, nbdriver_devpts_packages[i].name))
+			return (int)nbdriver_devpts_packages[i].status_index;
 	return -ENOENT;
 }
 

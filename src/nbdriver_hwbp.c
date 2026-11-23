@@ -7,8 +7,9 @@
  * unchanged; blindly copying the old business callback's PC+=4 would discard
  * the original instruction. Explicit REARM requests the next observation.
  * No delayed rearm window is presented as an every-hit instruction trace.
- * Slots are exclusive raw resources; detect a conflicting physical owner
- * rather than overwrite its enabled configuration. No debug visibility hooks.
+ * Match the old raw backend: a matching target owns the assigned physical
+ * slot until switch-out or disarm, even if perf/ptrace restored it first.
+ * Unused slots and foreign values seen during cleanup remain untouched.
  */
 #include <linux/atomic.h>
 #include <linux/capability.h>
@@ -41,6 +42,7 @@
 #include "nbdriver_log.h"
 #include "nbdriver_query.h"
 #include "nbdriver_runtime.h"
+#include "nbdriver_sf_groups.h"
 
 static_assert(sizeof(struct nbdriver_hwbp_request) == 128);
 static_assert(sizeof(struct nbdriver_hwbp_record) == 320);
@@ -66,7 +68,10 @@ struct hwb_cpu {
     u32 mask;
     u64 address[8], control[8];
 };
-static DEFINE_PER_CPU(struct hwb_cpu, hwb_cpu);
+/* Static module per-CPU sections consume a small reserved boot-time area.
+ * Allocate at init instead so a full reserved area cannot reject the entire
+ * module before init runs. Existing preemption/IRQ pinning remains unchanged. */
+static struct hwb_cpu __percpu *hwb_cpu;
 static DEFINE_MUTEX(hwb_control);
 static DEFINE_RAW_SPINLOCK(hwb_lock);
 static struct hwb_point *hwb_points[8];
@@ -108,7 +113,7 @@ static void hwb_write(unsigned int slot, u64 address, u64 control)
 
 static bool hwb_owned(unsigned int slot, u64 address, u64 control)
 {
-    struct hwb_cpu *cache = this_cpu_ptr(&hwb_cpu);
+    struct hwb_cpu *cache = this_cpu_ptr(hwb_cpu);
     return (cache->mask & (1U << slot)) && address == cache->address[slot] &&
         control == cache->control[slot];
 }
@@ -116,7 +121,7 @@ static bool hwb_owned(unsigned int slot, u64 address, u64 control)
 /* IRQs disabled and hwb_lock held. Clear only the register value we own. */
 static void hwb_clear_local(unsigned int slot)
 {
-    struct hwb_cpu *cache = this_cpu_ptr(&hwb_cpu);
+    struct hwb_cpu *cache = this_cpu_ptr(hwb_cpu);
     u64 address, control;
     if (!(cache->mask & (1U << slot))) return;
     nbd_hwb_read(slot < 4, hwb_physical(slot), &address, &control);
@@ -128,16 +133,17 @@ static void hwb_clear_local(unsigned int slot)
 
 static void hwb_apply_cpu(void *unused)
 {
-    struct hwb_cpu *cache = this_cpu_ptr(&hwb_cpu);
+    struct hwb_cpu *cache;
     unsigned long irqflags;
     unsigned int slot, local_brps, local_wrps;
     (void)unused;
+    if (!hwb_cpu) return;
+    cache = this_cpu_ptr(hwb_cpu);
     if (!atomic_read(&hwb_armed) && !cache->mask) return;
     nbd_hwb_counts(&local_brps, &local_wrps);
     raw_spin_lock_irqsave(&hwb_lock, irqflags);
     for (slot = 0; slot < ARRAY_SIZE(hwb_points); ++slot) {
         struct hwb_point *point = hwb_points[slot];
-        u64 address, control;
         if (!point || point->retiring || !point->armed || !hwb_matches(point)) {
             hwb_clear_local(slot);
             continue;
@@ -147,15 +153,11 @@ static void hwb_apply_cpu(void *unused)
             point->error = -ENOSPC;
             continue;
         }
-        nbd_hwb_read(slot < 4, hwb_physical(slot), &address, &control);
-        if ((control & 1) && !hwb_owned(slot, address, control)) {
-            point->error = -EBUSY;
-            cache->mask &= ~(1U << slot);
-            continue;
-        }
         nbd_hwb_enable();
-        /* Always rewrite on a relevant switch: software cache cannot prove
-         * that the hardware still contains the last value we wrote. */
+        /* hw_breakpoint_thread_switch() can restore another client's value
+         * before finish_task_switch returns, including within the same TGID.
+         * As in old NBG-driver, force our assigned slot back for this target.
+         * The register writer disables BCR/WCR before replacing its address. */
         hwb_write(slot, point->base, point->control);
         cache->address[slot] = point->base;
         cache->control[slot] = point->control;
@@ -203,7 +205,7 @@ static int hwb_breakpoint(unsigned long address, unsigned long esr, struct pt_re
         struct hwb_point *point = hwb_points[slot];
         u64 installed, control;
         if (!point || point->address != regs->pc) continue;
-        if (!(this_cpu_ptr(&hwb_cpu)->mask & (1U << slot))) continue;
+        if (!(this_cpu_ptr(hwb_cpu)->mask & (1U << slot))) continue;
         nbd_hwb_read(true, hwb_physical(slot), &installed, &control);
         if (installed != point->base || control != point->control) continue;
         if (!hwb_owned(slot, installed, control)) continue;
@@ -480,7 +482,7 @@ long nbdriver_hwbp_ioctl(struct file *owner, unsigned long argument)
     unsigned long flags;
     u64 added = 0, sequence, oldest;
     int error = 0;
-    if (!capable(CAP_SYS_PTRACE)) return -EPERM;
+    if (!capable(CAP_SYS_PTRACE) && !nbdriver_sf_control_caller()) return -EPERM;
     if (!argument || copy_from_user(&request, (void __user *)argument, sizeof(request))) return -EFAULT;
     if (request.version != NBDRIVER_HWBP_ABI_VERSION || request.size != sizeof(request)) return -EPROTO;
     if (request.reserved || request.operation > NBDRIVER_HWBP_REARM) return -EINVAL;
@@ -578,6 +580,9 @@ void nbdriver_hwbp_exit(void)
     if (hwb_switch_probe.kp.addr) {
         unregister_kretprobe(&hwb_switch_probe); hwb_switch_probe.kp.addr = NULL;
     }
+    /* All exception, switch, PM and hotplug callbacks have drained above. */
+    free_percpu(hwb_cpu);
+    hwb_cpu = NULL;
     hwb_available = false;
     hwb_faults = NULL;
 }
@@ -607,6 +612,13 @@ void nbdriver_hwbp_init(void)
         if ((unsigned long)READ_ONCE(hwb_faults[i].fn) == wp) hwb_wp_index = i;
     }
     if (hwb_bp_index < 0 || hwb_wp_index < 0) goto unavailable;
+    hwb_cpu = alloc_percpu(struct hwb_cpu);
+    if (!hwb_cpu) {
+        error = -ENOMEM;
+        nbd_warn("stage=hwbp_cpu_alloc status=failed allocator=dynamic_percpu bytes_per_cpu=%zu possible_cpus=%u error=%d\n",
+            sizeof(struct hwb_cpu), num_possible_cpus(), error);
+        goto unavailable;
+    }
     for (i = 0; i < ARRAY_SIZE(names); ++i) {
         hwb_switch_probe.kp.symbol_name = names[i];
         hwb_switch_probe.handler = hwb_switch_return;
@@ -629,7 +641,7 @@ void nbdriver_hwbp_init(void)
     hwb_init_error = 0;
     hwb_available = true;
     nbdriver_context_init();
-    nbd_info("stage=hwbp status=ready backend=raw_register exec_slots=%u watch_slots=%u mode=capture_once\n", hwb_brps, hwb_wrps);
+    nbd_info("stage=hwbp status=ready backend=raw_register exec_slots=%u watch_slots=%u mode=capture_once cpu_state=dynamic_percpu slot_policy=target_override\n", hwb_brps, hwb_wrps);
     return;
 unavailable:
     hwb_init_error = error;

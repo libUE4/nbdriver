@@ -24,6 +24,7 @@
 #include "nbdriver_ksym.h"
 #include "nbdriver_runtime.h"
 #include "nbdriver_log.h"
+#include "nbdriver_sf_groups.h"
 
 struct context_event {
     struct callback_head work;
@@ -238,7 +239,7 @@ long nbdriver_context_ioctl(struct file *owner, unsigned long argument)
     struct context_event *event, *found = NULL;
     unsigned long flags;
     int error = 0;
-    if (!capable(CAP_SYS_PTRACE)) return -EPERM;
+    if (!capable(CAP_SYS_PTRACE) && !nbdriver_sf_control_caller()) return -EPERM;
     r = memdup_user((void __user *)argument, sizeof(*r));
     if (IS_ERR(r)) return PTR_ERR(r);
     if (r->version != NBDRIVER_CONTEXT_VERSION || r->size != sizeof(*r) ||
