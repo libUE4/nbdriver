@@ -591,7 +591,7 @@ void nbdriver_hwbp_init(void)
 {
     static const char *const names[] = { "finish_task_switch", "finish_task_switch.isra.0",
         "finish_task_switch.constprop.0", "finish_task_switch.isra" };
-    unsigned long table, bp, wp;
+    unsigned long table, bp, wp, bp_cfi, wp_cfi;
     unsigned int i;
     u64 dfr = read_sysreg(id_aa64dfr0_el1);
     int error = -ENOENT;
@@ -603,15 +603,30 @@ void nbdriver_hwbp_init(void)
     if (!table) table = nbdriver_ksym_lookup_optional("debug_fault_info_table");
     bp = nbdriver_ksym_lookup_optional("breakpoint_handler");
     wp = nbdriver_ksym_lookup_optional("watchpoint_handler");
-    if (!table || !bp || !wp || !hwb_brps || !hwb_wrps) goto unavailable;
+    /* CFI-enabled vendor kernels may place the function pointers in the
+     * exception table at their .cfi_jt entry instead of the body symbol. */
+    bp_cfi = nbdriver_ksym_lookup_optional("breakpoint_handler.cfi_jt");
+    wp_cfi = nbdriver_ksym_lookup_optional("watchpoint_handler.cfi_jt");
+    if (!table || !bp || !wp || !hwb_brps || !hwb_wrps) {
+        error = -ENOENT;
+        nbd_warn("stage=hwbp_discovery status=missing table=%u breakpoint=%u watchpoint=%u exec_slots=%u watch_slots=%u\n",
+            !!table, !!bp, !!wp, hwb_brps, hwb_wrps);
+        goto unavailable;
+    }
     hwb_faults = (void *)table;
     /* ARM64 debug_fault_info has eight entries, not the old driver's scan of
      * sixteen. Resolve the handlers rather than guessing watchpoint index. */
     for (i = 0; i < 8; ++i) {
-        if ((unsigned long)READ_ONCE(hwb_faults[i].fn) == bp) hwb_bp_index = i;
-        if ((unsigned long)READ_ONCE(hwb_faults[i].fn) == wp) hwb_wp_index = i;
+        const unsigned long handler = (unsigned long)READ_ONCE(hwb_faults[i].fn);
+        if (handler == bp || (bp_cfi && handler == bp_cfi)) hwb_bp_index = i;
+        if (handler == wp || (wp_cfi && handler == wp_cfi)) hwb_wp_index = i;
     }
-    if (hwb_bp_index < 0 || hwb_wp_index < 0) goto unavailable;
+    if (hwb_bp_index < 0 || hwb_wp_index < 0) {
+        error = -ENOENT;
+		nbd_warn("stage=hwbp_discovery status=handler_not_in_table bp_index=%d wp_index=%d bp_cfi=%u wp_cfi=%u\n",
+			hwb_bp_index, hwb_wp_index, !!bp_cfi, !!wp_cfi);
+        goto unavailable;
+    }
     hwb_cpu = alloc_percpu(struct hwb_cpu);
     if (!hwb_cpu) {
         error = -ENOMEM;
@@ -625,6 +640,8 @@ void nbdriver_hwbp_init(void)
         hwb_switch_probe.maxactive = max_t(int, 64, num_possible_cpus() * 4);
         error = register_kretprobe(&hwb_switch_probe);
         if (!error) break;
+        nbd_warn("stage=hwbp_switch_probe status=retry symbol=%s error=%d\n",
+            names[i], error);
         hwb_switch_probe.kp.addr = NULL;
     }
     if (error) goto unavailable;
@@ -645,6 +662,8 @@ void nbdriver_hwbp_init(void)
     return;
 unavailable:
     hwb_init_error = error;
+    nbd_warn("stage=hwbp_init status=unavailable error=%d bp_index=%d wp_index=%d\n",
+        error, hwb_bp_index, hwb_wp_index);
     nbdriver_hwbp_exit();
     nbd_warn("stage=hwbp status=unavailable backend=raw_register error=%d\n", error);
 }

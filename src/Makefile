@@ -2,6 +2,7 @@
 # 实现对象显式列出；src/nbdriver_*.h 是私有声明，不单独编译。
 obj-m := nbdriver.o
 nbdriver-y := nbdriver_core.o \
+              nbdriver_task_layout.o \
               nbdriver_features.o \
               nbdriver_runtime.o \
               nbdriver_platform.o \

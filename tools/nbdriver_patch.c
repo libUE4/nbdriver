@@ -535,10 +535,14 @@ int nbdriver_patch_vermagic(const char *in_path, const char *out_path,
 		*changed_out = 0;
 	if (log && log_size)
 		log[0] = '\0';
-	if (!magic || !*magic || strpbrk(magic, " \t\r\n\f\v")) {
+	if (!magic || !*magic || strpbrk(magic, "\t\r\n\f\v") ||
+	    magic[0] == ' ' || magic[strlen(magic) - 1] == ' ') {
 		snprintf(log, log_size, "invalid_release");
 		return -EINVAL;
 	}
+	/* A single token means the traditional uname -r rewrite and preserves the
+	 * module's feature suffix. A space-bearing value is an exact, kernel-log-
+	 * verified complete vermagic (vendor kernels may require extra tokens). */
 
 	rc = read_whole(in_path, &buf, &size);
 	if (rc < 0) {
@@ -662,7 +666,8 @@ int nbdriver_patch_vermagic(const char *in_path, const char *out_path,
 		const size_t old_entry_len = strnlen(old + cursor, old_len - cursor);
 		const char *value = old + cursor + strlen(VERMAGIC_KEY);
 		const size_t value_len = old_entry_len - strlen(VERMAGIC_KEY);
-		const char *suffix = memchr(value, ' ', value_len);
+		const int exact = strpbrk(magic, " ") != NULL;
+		const char *suffix = exact ? NULL : memchr(value, ' ', value_len);
 		const size_t suffix_len = suffix ? old_entry_len -
 			(size_t)(suffix - (old + cursor)) : 0;
 		const size_t prefix_len = strlen(VERMAGIC_KEY);

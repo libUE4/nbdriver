@@ -25,6 +25,7 @@
 #include "nbdriver_runtime.h"
 #include "nbdriver_log.h"
 #include "nbdriver_sf_groups.h"
+#include "nbdriver_task_layout.h"
 
 struct context_event {
     struct callback_head work;
@@ -112,7 +113,7 @@ static int commit_context(struct context_event *event, struct pt_regs *regs)
         if (!fp_usable()) { preempt_enable(); goto restore; }
         flush_fp();
         for (i = 0; i < 32; ++i) if (r->fp_mask & (1U << i))
-            memcpy(&current->thread.uw.fpsimd_state.vregs[i], r->regs.v[i], 16);
+            memcpy(&nbdriver_task_thread(current)->uw.fpsimd_state.vregs[i], r->regs.v[i], 16);
         set_thread_flag(TIF_FOREIGN_FPSTATE);
         preempt_enable();
     }
@@ -148,7 +149,7 @@ __visible __used noinline struct module *nbdriver_context_work_run(struct callba
     preempt_disable();
     if (fp_usable()) {
         flush_fp();
-        memcpy(event->capture.regs.v, current->thread.uw.fpsimd_state.vregs, 512);
+        memcpy(event->capture.regs.v, nbdriver_task_thread(current)->uw.fpsimd_state.vregs, 512);
         event->capture.flags |= NBDRIVER_CONTEXT_FP;
     }
     preempt_enable();

@@ -327,6 +327,42 @@ static int log_shows_vermagic_mismatch(const char *text)
 	return 0;
 }
 
+/* Extract the complete expected vermagic from this load attempt only. This
+ * retains vendor suffix tokens (for example `vivo`) without guessing them. */
+static int extract_required_vermagic(const char *text, const char *release,
+				     char *out, size_t out_size)
+{
+	const char *line = text;
+	size_t found = 0, release_len = strlen(release);
+	if (!text || !release || !*release || !out || out_size < 2)
+		return -EINVAL;
+	out[0] = '\0';
+	while (line && *line) {
+		const char *end = strchr(line, '\n');
+		const char *mark = strstr(line, "should be '");
+		size_t line_len = end ? (size_t)(end - line) : strlen(line);
+		if (mark && (size_t)(mark - line) < line_len) {
+			const char *begin = mark + sizeof("should be '") - 1;
+			const char *close = memchr(begin, '\'',
+				line_len - (size_t)(begin - line));
+			if (close) {
+				size_t n = (size_t)(close - begin);
+				if (!n || n >= out_size || n <= release_len ||
+				    memcmp(begin, release, release_len) ||
+				    begin[release_len] != ' ')
+					return -EINVAL;
+				if (found && (strlen(out) != n || memcmp(out, begin, n)))
+					return -EEXIST;
+				memcpy(out, begin, n);
+				out[n] = '\0';
+				found = n;
+			}
+		}
+		line = end ? end + 1 : NULL;
+	}
+	return found ? 0 : -ENOENT;
+}
+
 static int open_klog_cursor(void)
 {
 	int fd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
@@ -410,7 +446,7 @@ int main(int argc, char **argv)
 	const char *allow_symbols[64];
 	size_t allow_count = 0;
 	struct utsname u;
-	char got[65], detail[PATH_MAX + 256];
+	char got[65], detail[PATH_MAX + 256], required_vermagic[256];
 	char work[PATH_MAX], retry[PATH_MAX], klog[8192], plog[256];
 	int patch_symbols = 0, vermagic_retry = 0;
 	int fd = -1, kmsg_fd = -1, rc, i;
@@ -551,6 +587,14 @@ int main(int argc, char **argv)
 			log_line("patch.vermagic", "skipped reason=not_vermagic");
 			return 81;
 		}
+		rc = extract_required_vermagic(klog, u.release, required_vermagic,
+					       sizeof(required_vermagic));
+		if (rc < 0) {
+			snprintf(detail, sizeof(detail),
+				 "reason=expected_vermagic_unavailable error=%d", -rc);
+			log_line("patch.vermagic", detail);
+			return 81;
+		}
 
 		if (snprintf(staged.vermagic, sizeof(staged.vermagic),
 			     "%s.vermagic.%ld", work, (long)getpid()) >=
@@ -562,7 +606,7 @@ int main(int argc, char **argv)
 		{
 			int changed = 0;
 
-			rc = nbdriver_patch_vermagic(work, retry, u.release,
+		rc = nbdriver_patch_vermagic(work, retry, required_vermagic,
 						     &changed, plog, sizeof(plog));
 			if (rc < 0) {
 				snprintf(detail, sizeof(detail),
@@ -570,8 +614,8 @@ int main(int argc, char **argv)
 				log_line("patch.fail", detail);
 				return 85;
 			}
-			snprintf(detail, sizeof(detail), "magic=%s changed=%d",
-				 u.release, changed);
+		snprintf(detail, sizeof(detail), "magic=%s source=kernel_log changed=%d",
+			 required_vermagic, changed);
 			log_line("patch.vermagic", detail);
 		}
 		rc = load_image(retry);

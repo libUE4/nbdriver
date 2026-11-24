@@ -30,6 +30,7 @@
 #include "nbdriver_touch.h"
 #include "nbdriver_gyro.h"
 #include "nbdriver_hwbp.h"
+#include "nbdriver_task_layout.h"
 
 static int __init nbdriver_init(void)
 {
@@ -45,6 +46,12 @@ static int __init nbdriver_init(void)
 	if (ret) {
 		nbd_err("stage=module_init dependency=ksym error=%d\n", ret);
 		goto err_comm;
+	}
+
+	ret = nbdriver_task_layout_init();
+	if (ret) {
+		nbd_err("stage=module_init dependency=task_layout error=%d\n", ret);
+		goto err_ksym;
 	}
 
 	ret = nbdriver_touch_init();
@@ -960,7 +967,7 @@ int nbdriver_query_init(void)
 		nbdriver_ksym_lookup("task_call_func");
 	query_lock_sighand = (__typeof__(query_lock_sighand))
 		nbdriver_ksym_lookup_optional("__lock_task_sighand");
-	nbd_info("stage=thread_environment backend=%s fp=%u\n",
+		nbd_info("stage=thread_environment backend=%s fp=%u\n",
 		 query_task_call ? "task_call_func" : "blocked_task_or_ipi",
 		 query_task_call != NULL);
 	return query_access ? 0 : -ENOENT;
@@ -979,7 +986,7 @@ u32 nbdriver_query_features(void)
 		NBDRIVER_FEATURE_PROCESS_ID | NBDRIVER_FEATURE_THREAD_ID |
 		NBDRIVER_FEATURE_THREAD_ENV |
 		(query_lock_sighand ? NBDRIVER_FEATURE_THREAD_SIGNAL : 0) |
-		(query_task_call ? NBDRIVER_FEATURE_THREAD_FP : 0);
+		NBDRIVER_FEATURE_THREAD_FP;
 }
 
 static noinline bool NBDRIVER_NO_CFI query_may_access(struct task_struct *task)
@@ -1296,12 +1303,12 @@ static int query_environment_sample(struct task_struct *task, void *output)
 	if (!pid_alive(task) || (READ_ONCE(task->flags) & PF_EXITING))
 		return -ESRCH;
 	req->tls = task == current ? read_sysreg(tpidr_el0) :
-		READ_ONCE(*task_user_tls(task));
+		READ_ONCE(*nbdriver_task_user_tls(task));
 	req->valid = NBDRIVER_THREAD_TLS_VALID; /* A zero TLS is still a sample. */
 #ifdef CONFIG_ARM64_PTR_AUTH
 	if (system_supports_generic_auth()) {
-		req->apga_lo = READ_ONCE(task->thread.keys_user.apga.lo);
-		req->apga_hi = READ_ONCE(task->thread.keys_user.apga.hi);
+		req->apga_lo = READ_ONCE(nbdriver_task_thread(task)->keys_user.apga.lo);
+		req->apga_hi = READ_ONCE(nbdriver_task_thread(task)->keys_user.apga.hi);
 		/* Reject a sample taken midway through PR_PAC_RESET_KEYS, before
 		 * the newly generated software key has been fully installed. */
 		if (task == current &&
@@ -1445,9 +1452,9 @@ static int query_fp_sample(struct task_struct *task, void *output)
 #endif
 	if (!pid_alive(task) || (READ_ONCE(task->flags) & PF_EXITING))
 		return -ESRCH;
-	req->tls = READ_ONCE(*task_user_tls(task));
-	req->fpsr = READ_ONCE(task->thread.uw.fpsimd_state.fpsr);
-	req->fpcr = READ_ONCE(task->thread.uw.fpsimd_state.fpcr);
+	req->tls = READ_ONCE(*nbdriver_task_user_tls(task));
+	req->fpsr = READ_ONCE(nbdriver_task_thread(task)->uw.fpsimd_state.fpsr);
+	req->fpcr = READ_ONCE(nbdriver_task_thread(task)->uw.fpsimd_state.fpcr);
 	req->sample_ns = ktime_get_ns();
 	req->valid = NBDRIVER_THREAD_FP_VALID;
 	return 0;
@@ -1456,7 +1463,31 @@ static int query_fp_sample(struct task_struct *task, void *output)
 static noinline int NBDRIVER_NO_CFI query_fp_call(struct task_struct *task,
 					       struct nbdriver_thread_fpstate *req)
 {
-	return query_task_call(task, query_fp_sample, req);
+	unsigned long flags;
+	unsigned int state;
+	int ret = -EAGAIN;
+	if (query_task_call)
+		return query_task_call(task, query_fp_sample, req);
+	/* The vendor kernel omits task_call_func. For a sleeping, non-runnable
+	 * task, pi_lock plus the scheduler-state checks provide a stable saved
+	 * FPSIMD image. Do not sample live task state without a rendezvous. */
+	raw_spin_lock_irqsave(&task->pi_lock, flags);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
+	state = READ_ONCE(task->__state);
+#else
+	state = READ_ONCE(task->state);
+#endif
+	if (state != TASK_RUNNING && state != TASK_WAKING) {
+		smp_rmb();
+		if (!READ_ONCE(task->on_rq)
+#ifdef CONFIG_SMP
+		    && !smp_load_acquire(&task->on_cpu)
+#endif
+		    )
+			ret = query_fp_sample(task, req);
+	}
+	raw_spin_unlock_irqrestore(&task->pi_lock, flags);
+	return ret;
 }
 
 static long query_fpstate(unsigned long argument)
@@ -1469,8 +1500,6 @@ static long query_fpstate(unsigned long argument)
 		return -EFAULT;
 	if (req.reserved)
 		return -EINVAL;
-	if (!query_task_call)
-		return -EOPNOTSUPP;
 	task = query_task(req.pid, req.tid, req.expected_start_ns,
 			  req.expected_thread_start_ns);
 	if (IS_ERR(task))
