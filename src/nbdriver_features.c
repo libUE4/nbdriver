@@ -421,7 +421,8 @@ static long metadata_fd_seek(unsigned long argument)
 	if (copy_from_user(&req, (void __user *)argument, sizeof(req)))
 		return -EFAULT;
 	if (req.pid <= 0 || req.target_fd < 0 || req.reserved ||
-	    (req.whence != SEEK_SET && req.whence != SEEK_END &&
+	    (req.whence != SEEK_SET && req.whence != SEEK_CUR &&
+	     req.whence != SEEK_END &&
 	     req.whence != SEEK_DATA && req.whence != SEEK_HOLE))
 		return -EINVAL;
 	req.result = 0;
@@ -442,7 +443,18 @@ static long metadata_fd_seek(unsigned long argument)
 	} else {
 		if (!S_ISREG(file_inode(file)->i_mode))
 			ret = -EOPNOTSUPP;
-		else
+		else if (req.whence == SEEK_CUR) {
+			/* metadata_open() starts an independent description at offset 0.
+			 * Translate SEEK_CUR against the target's current position without
+			 * changing that position, then seek the independent copy absolutely. */
+			const loff_t current_pos = READ_ONCE(file->f_pos);
+			if ((req.offset > 0 && current_pos > LLONG_MAX - req.offset) ||
+			    (req.offset < 0 && current_pos < LLONG_MIN - req.offset))
+				ret = -EOVERFLOW;
+			else
+				ret = metadata_seek_copy(file, current_pos + req.offset,
+							SEEK_SET, &req.result);
+		} else
 			ret = metadata_seek_copy(file, req.offset, req.whence, &req.result);
 		fput(file);
 	}
@@ -2388,8 +2400,10 @@ int nbdriver_mapping_locked(struct vm_area_struct *vma, unsigned long address,
 
 /* ===== BEGIN src/features/nbdriver_devpts.c ===== */
 // SPDX-License-Identifier: GPL-2.0-only
-/* Automatically discover the two exact argv[0] names. The immutable snapshot
- * holds PID + mm identities; neither PID reuse nor exec inherits a match. */
+/* Automatically discover the exact argv[0] names. DFM regional packages share
+ * status slot 0; RMCN retains slot 1 in the existing two-slot status ABI.
+ * The immutable snapshot holds PID + mm identities; neither PID reuse nor exec
+ * inherits a match. */
 #include <linux/atomic.h>
 #include <linux/capability.h>
 #include <linux/dcache.h>
@@ -2418,8 +2432,14 @@ int nbdriver_mapping_locked(struct vm_area_struct *vma, unsigned long address,
 #define NBDRIVER_DEVPTS_SLAVE_MAJOR 136U
 #define NBDRIVER_DEVPTS_SCAN_DELAY msecs_to_jiffies(500)
 
-static const char *const nbdriver_devpts_packages[] = {
-	"com.tencent.tmgp.dfm", "com.tencent.rmcn",
+static const struct {
+	const char *name;
+	u32 status_index;
+} nbdriver_devpts_packages[] = {
+	{ "com.tencent.tmgp.dfm", 0 },
+	{ "com.tencent.rmcn", 1 },
+	{ "com.garena.game.df", 0 },
+	{ "com.proxima.dfm", 0 },
 };
 
 struct nbdriver_devpts_target {
@@ -2451,8 +2471,8 @@ static int nbdriver_devpts_package_index(const char *name)
 	u32 i;
 
 	for (i = 0; i < ARRAY_SIZE(nbdriver_devpts_packages); ++i)
-		if (!strcmp(name, nbdriver_devpts_packages[i]))
-			return (int)i;
+		if (!strcmp(name, nbdriver_devpts_packages[i].name))
+			return (int)nbdriver_devpts_packages[i].status_index;
 	return -ENOENT;
 }
 

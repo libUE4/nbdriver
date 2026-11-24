@@ -121,8 +121,10 @@ KGSL 可选后端需验证 FD、模块归属和实现布局；能力位不保证
 
 ## 自动 devpts 与 SF groups
 
-devpts 在模块加载后自动按完整 argv[0] 发现 `com.tencent.tmgp.dfm`、`com.tencent.rmcn`，
-每轮完成后间隔 500ms，再扫描；同名多实例可并存。匹配 PID 对象和 mm 身份，PID 复用/exec 不继承绑定。
+devpts 在模块加载后自动按完整 argv[0] 发现 `com.tencent.tmgp.dfm`、`com.garena.game.df`、
+`com.proxima.dfm` 和 `com.tencent.rmcn`。前三者共用 DFM 状态槽 `pids[0]`，RMCN 保留 `pids[1]`；
+每槽展示一个匹配 PID，`target_count` 统计全部匹配实例。
+每轮完成后间隔 500ms 再扫描；同名多实例可并存。匹配 PID 对象和 mm 身份，PID 复用/exec 不继承绑定。
 只改变目标对 `/dev/pts/0..31` 的 access/stat 观察，普通 open/read/write 语义不变。
 `nbdriver_get_devpts_status` 为只读 0x1f 请求；active 表示两个探针存在，无目标仍可为 1。
 手动配置 0x1c 已删除。状态查询仍要求 CAP_SYS_PTRACE，不能仅凭 system UID 假定成功。

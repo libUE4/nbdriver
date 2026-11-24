@@ -1232,7 +1232,7 @@ static inline int nbdriver_query_file_seek(int fd, int pid, int target_fd,
  if (!out) { errno = EINVAL; return -1; }
  memset(out, 0, sizeof(*out));
  if (fd < 0 || pid <= 0 || target_fd < 0 ||
-     (whence != 0 && whence != 2 && whence != 3 && whence != 4)) {
+     (whence != 0 && whence != 1 && whence != 2 && whence != 3 && whence != 4)) {
   errno = EINVAL; return -1;
  }
  out->pid = pid; out->target_fd = target_fd;

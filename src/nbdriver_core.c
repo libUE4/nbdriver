@@ -1417,6 +1417,16 @@ static long query_environment(unsigned long argument)
 	req.expected_thread_start_ns = READ_ONCE(task->start_boottime);
 	ret = query_environment_call(task, &req);
 	query_put_task(task);
+	if (ret || !(req.valid & NBDRIVER_THREAD_APGA_VALID) || !req.tls)
+		nbd_warn("stage=thread_env pid=%d tid=%d error=%d valid=0x%x tls_present=%u ptr_auth_config=%u generic_auth=%u sampler=%s\n",
+			req.pid, req.tid, ret, req.valid, !!req.tls,
+			IS_ENABLED(CONFIG_ARM64_PTR_AUTH),
+#ifdef CONFIG_ARM64_PTR_AUTH
+			system_supports_generic_auth(),
+#else
+			0U,
+#endif
+			query_task_call ? "task_call_func" : "blocked_or_ipi");
 	if (copy_to_user((void __user *)argument, &req, sizeof(req)))
 		return -EFAULT;
 	return ret;
