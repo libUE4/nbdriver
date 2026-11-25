@@ -32,9 +32,9 @@
 #include <linux/spinlock.h>
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
+#include <linux/version.h>
 #include <asm/esr.h>
 #include <asm/compat.h>
-#include <asm/debug-monitors.h>
 #include <asm/ptrace.h>
 #include "nbdriver_hwbp.h"
 #include "nbdriver_hwbp_regs.h"
@@ -48,15 +48,17 @@
 static_assert(sizeof(struct nbdriver_hwbp_request) == 128);
 static_assert(sizeof(struct nbdriver_hwbp_record) == 320);
 
-/* The debug ABI uses a 32-bit ESR on 5.10/5.15 and a 64-bit ESR on newer
- * kernels. Both the exception table and debug hooks use that same type.
- * Derive it from the target headers: a register-compatible but differently
- * typed callback still fails CFI when the first debug exception is dispatched.
- * No default: an unfamiliar debug-hook ABI must fail compilation.
+/* The debug ABI uses a 32-bit ESR on Android 5.x and a 64-bit ESR on
+ * Android 6.x+. Keep this selection tied to the kernel UAPI version rather
+ * than a private hook structure: 6.18 no longer exposes struct step_hook.
+ * A register-compatible but differently typed callback still fails CFI when
+ * the first debug exception is dispatched.
  */
-typedef typeof(_Generic(((struct step_hook *)0)->fn,
-    int (*)(struct pt_regs *, unsigned int): 0U,
-    int (*)(struct pt_regs *, unsigned long): 0UL)) hwb_esr_t;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 0, 0)
+typedef unsigned int hwb_esr_t;
+#else
+typedef unsigned long hwb_esr_t;
+#endif
 
 struct hwb_fault_info {
     int (*fn)(unsigned long, hwb_esr_t, struct pt_regs *);
