@@ -40,6 +40,11 @@ static __typeof__(&vfs_rename) config_rename_fn;
 static __typeof__(&vfs_unlink) config_unlink_fn;
 static __typeof__(&file_open_root) config_open_fn;
 static __typeof__(&__put_cred) config_release_cred_fn;
+static __typeof__(&dput) config_dput_fn;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
+static __typeof__(&override_creds) config_override_creds_fn;
+static __typeof__(&revert_creds) config_revert_creds_fn;
+#endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
 static __typeof__(&lookup_one) config_lookup_fn;
 #else
@@ -78,16 +83,24 @@ static bool root_caller(void)
         uid_eq(c->suid, GLOBAL_ROOT_UID) && uid_eq(c->fsuid, GLOBAL_ROOT_UID);
 }
 
+static int config_resolve(void);
+
 int nbdriver_config_init(void)
 {
+    int error;
     /* finit_module runs in the authorized installer/root-manager domain.
      * Capturing it avoids guessing KSU/Magisk SELinux domain names. */
     if (!root_caller())
         return -EACCES;
     config_release_cred_fn = (__typeof__(config_release_cred_fn))
         nbdriver_ksym_lookup_optional("__put_cred");
-    if (!config_release_cred_fn)
+    if (!config_release_cred_fn) {
+        nbdriver_log_missing_once("config_symbols", "__put_cred", -EOPNOTSUPP);
         return -EOPNOTSUPP;
+    }
+    error = config_resolve();
+    if (error)
+        return error;
     config_cred = get_current_cred();
     return 0;
 }
@@ -102,49 +115,95 @@ void nbdriver_config_exit(void)
 
 static int config_resolve(void)
 {
-    if (!config_filp_open_fn)
-        config_filp_open_fn = (__typeof__(config_filp_open_fn))
-            nbdriver_ksym_lookup_optional("filp_open");
-    if (!config_kernel_read_fn)
-        config_kernel_read_fn = (__typeof__(config_kernel_read_fn))
-            nbdriver_ksym_lookup_optional("kernel_read");
-    if (!config_kernel_write_fn)
-        config_kernel_write_fn = (__typeof__(config_kernel_write_fn))
-            nbdriver_ksym_lookup_optional("kernel_write");
-    if (!config_mnt_want_write_fn)
-        config_mnt_want_write_fn = (__typeof__(config_mnt_want_write_fn))
-            nbdriver_ksym_lookup_optional("mnt_want_write");
-    if (!config_mnt_drop_write_fn)
-        config_mnt_drop_write_fn = (__typeof__(config_mnt_drop_write_fn))
-            nbdriver_ksym_lookup_optional("mnt_drop_write");
-    if (!config_fsync_fn)
-        config_fsync_fn = (__typeof__(config_fsync_fn))
-            nbdriver_ksym_lookup_optional("vfs_fsync");
-    if (!config_open_fn)
-        config_open_fn = (__typeof__(config_open_fn))nbdriver_ksym_lookup_optional("file_open_root");
-    if (!config_rename_fn)
-        config_rename_fn = (__typeof__(config_rename_fn))nbdriver_ksym_lookup_optional("vfs_rename");
-    if (!config_unlink_fn)
-        config_unlink_fn = (__typeof__(config_unlink_fn))nbdriver_ksym_lookup_optional("vfs_unlink");
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
-    if (!config_lookup_fn)
-        config_lookup_fn = (__typeof__(config_lookup_fn))nbdriver_ksym_lookup_optional("lookup_one");
-    if (!config_lookup_fn)
-        return -EOPNOTSUPP;
-#else
-    if (!config_lookup_len_fn)
-        config_lookup_len_fn = (__typeof__(config_lookup_len_fn))
-            nbdriver_ksym_lookup_optional("lookup_one_len");
+    bool ready = true;
+
+    /* Missing optional storage symbols must not become module imports or
+     * partially override credentials. Report every absent dependency. */
+#define CONFIG_RESOLVE(member, symbol) do { \
+    if (!(member)) \
+        (member) = (__typeof__(member))nbdriver_ksym_lookup_optional(symbol); \
+    if (!(member)) { \
+        nbdriver_log_missing_once("config_symbols", symbol, -EOPNOTSUPP); \
+        ready = false; \
+    } \
+} while (0)
+    CONFIG_RESOLVE(config_filp_open_fn, "filp_open");
+    CONFIG_RESOLVE(config_kernel_read_fn, "kernel_read");
+    CONFIG_RESOLVE(config_kernel_write_fn, "kernel_write");
+    CONFIG_RESOLVE(config_mnt_want_write_fn, "mnt_want_write");
+    CONFIG_RESOLVE(config_mnt_drop_write_fn, "mnt_drop_write");
+    CONFIG_RESOLVE(config_fsync_fn, "vfs_fsync");
+    CONFIG_RESOLVE(config_open_fn, "file_open_root");
+    CONFIG_RESOLVE(config_rename_fn, "vfs_rename");
+    CONFIG_RESOLVE(config_unlink_fn, "vfs_unlink");
+    CONFIG_RESOLVE(config_dput_fn, "dput");
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
+    CONFIG_RESOLVE(config_override_creds_fn, "override_creds");
+    CONFIG_RESOLVE(config_revert_creds_fn, "revert_creds");
 #endif
-    return config_filp_open_fn && config_kernel_read_fn && config_kernel_write_fn &&
-        config_mnt_want_write_fn && config_mnt_drop_write_fn && config_fsync_fn &&
-        config_open_fn && config_rename_fn && config_unlink_fn
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
-        && config_lookup_fn
+    CONFIG_RESOLVE(config_lookup_fn, "lookup_one");
 #else
-        && config_lookup_len_fn
+    CONFIG_RESOLVE(config_lookup_len_fn, "lookup_one_len");
 #endif
-        ? 0 : -EOPNOTSUPP;
+#undef CONFIG_RESOLVE
+    return ready ? 0 : -EOPNOTSUPP;
+}
+
+/* Only the typed raw-symbol calls are exempted, never the ioctl callback. */
+static noinline const struct cred *NBDRIVER_NO_CFI
+config_override(const struct cred *cred)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+    /* These APIs are header inlines on this supported KMI, not ELF symbols. */
+    return override_creds(cred);
+#else
+    return config_override_creds_fn(cred);
+#endif
+}
+
+static noinline void NBDRIVER_NO_CFI config_revert(const struct cred *cred)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+    revert_creds(cred);
+#else
+    config_revert_creds_fn(cred);
+#endif
+}
+
+static noinline void NBDRIVER_NO_CFI config_dput(struct dentry *dentry)
+{
+    config_dput_fn(dentry);
+}
+
+static noinline struct file *NBDRIVER_NO_CFI config_filp_open(const char *name, int flags, umode_t mode)
+{
+    return config_filp_open_fn(name, flags, mode);
+}
+
+static noinline ssize_t NBDRIVER_NO_CFI config_read_bytes(struct file *file, void *buffer, size_t count, loff_t *pos)
+{
+    return config_kernel_read_fn(file, buffer, count, pos);
+}
+
+static noinline ssize_t NBDRIVER_NO_CFI config_write_bytes(struct file *file, const void *buffer, size_t count, loff_t *pos)
+{
+    return config_kernel_write_fn(file, buffer, count, pos);
+}
+
+static noinline int NBDRIVER_NO_CFI config_sync(struct file *file)
+{
+    return config_fsync_fn(file, 0);
+}
+
+static noinline int NBDRIVER_NO_CFI config_want_write(struct vfsmount *mount)
+{
+    return config_mnt_want_write_fn(mount);
+}
+
+static noinline void NBDRIVER_NO_CFI config_drop_write(struct vfsmount *mount)
+{
+    config_mnt_drop_write_fn(mount);
 }
 
 /* Raw-symbol boundaries stay typed and isolated; registered ioctl retains CFI. */
@@ -221,7 +280,7 @@ static struct file *config_directory(void)
     struct file *parent, *child;
     const char *const children[] = { "nbg", "state" };
     int i;
-    parent = config_filp_open_fn("/data/misc/wmtrace", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
+    parent = config_filp_open("/data/misc/wmtrace", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
     for (i = 0; !IS_ERR(parent); ++i) {
         if (!private_inode(file_inode(parent), true)) {
             fput(parent);
@@ -243,7 +302,7 @@ static int config_change(struct file *dir, const char *name, struct file *temp)
     struct dentry *target, *source = NULL;
     struct inode *inode;
     int error;
-    error = config_mnt_want_write_fn(dir->f_path.mnt);
+    error = config_want_write(dir->f_path.mnt);
     if (error)
         return error;
     inode_lock_nested(file_inode(dir), I_MUTEX_PARENT);
@@ -268,10 +327,10 @@ static int config_change(struct file *dir, const char *name, struct file *temp)
             error = config_rename(dir, source, target);
     }
 target_out:
-    dput(target);
+    config_dput(target);
 unlock:
     inode_unlock(file_inode(dir));
-    config_mnt_drop_write_fn(dir->f_path.mnt);
+    config_drop_write(dir->f_path.mnt);
     return error;
 }
 
@@ -296,7 +355,7 @@ static int config_read(struct file *dir, const char *name, void *bytes,
         goto out;
     }
     while (pos < size) {
-        ssize_t n = config_kernel_read_fn(file, (char *)bytes + pos, size - pos, &pos);
+        ssize_t n = config_read_bytes(file, (char *)bytes + pos, size - pos, &pos);
         if (n <= 0) { error = n < 0 ? n : -EIO; goto out; }
     }
     if (i_size_read(file_inode(file)) != size) { error = -ESTALE; goto out; }
@@ -325,11 +384,11 @@ static int config_write(struct file *dir, const char *name, void *bytes,
     if (!private_inode(file_inode(temp), false)) { error = -EACCES; goto out; }
     r->stage = NBDRIVER_CONFIG_STAGE_TRANSFER;
     while (pos < r->size) {
-        ssize_t n = config_kernel_write_fn(temp, (char *)bytes + pos, r->size - pos, &pos);
+        ssize_t n = config_write_bytes(temp, (char *)bytes + pos, r->size - pos, &pos);
         if (n <= 0) { error = n < 0 ? n : -EIO; goto out; }
     }
     r->stage = NBDRIVER_CONFIG_STAGE_FILE_SYNC;
-    error = config_fsync_fn(temp, 0);
+    error = config_sync(temp);
     if (error)
         goto out;
     r->stage = NBDRIVER_CONFIG_STAGE_PUBLISH;
@@ -338,7 +397,7 @@ static int config_write(struct file *dir, const char *name, void *bytes,
         goto out;
     r->transferred = r->size;
     r->stage = NBDRIVER_CONFIG_STAGE_DIRECTORY_SYNC;
-    error = config_fsync_fn(dir, 0);
+    error = config_sync(dir);
 out:
     fput(temp);
     cleanup = config_change(dir, tmp, NULL);
@@ -390,7 +449,7 @@ long nbdriver_config_ioctl(unsigned long argument)
     error = config_cred ? config_resolve() : -ENODEV;
     if (error || r.operation == NBDRIVER_CONFIG_QUERY)
         goto unlock;
-    previous = override_creds(config_cred);
+    previous = config_override(config_cred);
     r.stage = NBDRIVER_CONFIG_STAGE_DIRECTORY;
     dir = config_directory();
     if (IS_ERR(dir)) {
@@ -407,12 +466,12 @@ long nbdriver_config_ioctl(unsigned long argument)
             error = config_change(dir, name, NULL);
             if (!error) {
                 r.stage = NBDRIVER_CONFIG_STAGE_DIRECTORY_SYNC;
-                error = config_fsync_fn(dir, 0);
+                error = config_sync(dir);
             }
         }
         fput(dir);
     }
-    revert_creds(previous);
+    config_revert(previous);
     if (!error && r.operation == NBDRIVER_CONFIG_READ &&
         copy_to_user(u64_to_user_ptr(r.buffer), bytes, r.transferred)) {
         r.stage = NBDRIVER_CONFIG_STAGE_COPY;

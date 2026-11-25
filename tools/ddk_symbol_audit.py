@@ -25,6 +25,10 @@ SYMBOLS = [
     "mm_access", "fixup_user_fault", "zero_pfn", "copy_to_user_page",
     "init_user_ns", "get_task_cred", "__put_cred", "task_uid",
     "__arm64_sys_lookup_dcookie", "__arm64_sys_ni_syscall",
+    "override_creds", "revert_creds", "dput", "filp_open",
+    "kernel_read", "kernel_write", "mnt_want_write", "mnt_drop_write",
+    "vfs_fsync", "file_open_root", "vfs_rename", "vfs_unlink",
+    "lookup_one", "lookup_one_len",
 ]
 SOURCE_PATHS = [
     "Makefile", "kernel/kallsyms.c", "kernel/task_work.c", "kernel/kprobes.c",
