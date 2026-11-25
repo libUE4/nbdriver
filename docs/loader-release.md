@@ -91,6 +91,9 @@ HTTP 响应的摘要头只做一致性检查。没有可信摘要就停止下载
 
 原生 `nbdriver_patch_vermagic` 接收完整 `uname -r`，替换 release token 并保留空格后的特性/架构字段。
 release 内的连字符属于 release 本身。新 `.modinfo` 追加到文件，不移动原 section。
+完整 `vermagic` 按内核本次加载日志逐字节保留，包括 `aarch64 vivo ` 的末尾空格和
+`vivo aarch64` 的厂商标记位置。独立加载器仅在 `ENOEXEC` 且同一条 `nbdriver: version magic`
+日志提供有效目标值时重试；无关模块、日志截断、冲突记录及签名/权限失败均不触发改写。
 输出使用独占创建，重用路径报 `output_exists errno=17`。改写的绝对地址产物只限其取址的内核启动实例，
 外部保存或复用时必须验证来源和 boot_id；默认加载流程每次生成私有副本并清理。
 

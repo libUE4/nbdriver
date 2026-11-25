@@ -86,6 +86,12 @@ def main():
         "kern_path", "path_put",
         # Vendor 6.1.25 keeps the body but omits the module export.
         "iov_iter_advance",
+        # Optional config storage must not prevent module loading on vendor
+        # kernels that retain these bodies without module exports.
+        "override_creds", "revert_creds", "dput", "filp_open",
+        "kernel_read", "kernel_write", "mnt_want_write", "mnt_drop_write",
+        "vfs_fsync", "file_open_root", "vfs_rename", "vfs_unlink",
+        "lookup_one", "lookup_one_len",
     }
     missing = [name for name in imports if name not in exports or name in protected]
 

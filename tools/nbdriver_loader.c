@@ -286,81 +286,106 @@ static int valid_symbol_name(const char *name)
 	return 1;
 }
 
-/*
- * Read kernel log text produced by this load attempt and decide whether the
- * failure was specifically a vermagic rejection. Anything else must not
- * trigger a rewrite: the point of the retry is to be targeted.
- */
-static int log_shows_vermagic_mismatch(const char *text)
+static int klog_hex(unsigned char c)
 {
-	const char *line = text;
-
-	while (line && *line) {
-		const char *end = strchr(line, '\n');
-		const char *module = strstr(line, "nbdriver:");
-		size_t len = end ? (size_t)(end - line) : strlen(line);
-
-		if (module && (size_t)(module - line) < len) {
-			if ((memmem(module, len - (size_t)(module - line), "Unknown symbol",
-				    sizeof("Unknown symbol") - 1)) ||
-			    memmem(module, len - (size_t)(module - line),
-				   "disagrees about version",
-				   sizeof("disagrees about version") - 1)) {
-				line = end ? end + 1 : NULL;
-				continue;
-			}
-			if (memmem(module, len - (size_t)(module - line), "version magic",
-				   sizeof("version magic") - 1) &&
-			    (memmem(module, len - (size_t)(module - line), "should be",
-				    sizeof("should be") - 1) ||
-			     memmem(module, len - (size_t)(module - line), "disagrees",
-				    sizeof("disagrees") - 1)))
-				return 1;
-			if (memmem(module, len - (size_t)(module - line), "vermagic",
-				   sizeof("vermagic") - 1) &&
-			    memmem(module, len - (size_t)(module - line), "mismatch",
-				   sizeof("mismatch") - 1))
-				return 1;
-		}
-		line = end ? end + 1 : NULL;
-	}
-	return 0;
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
 }
 
 /* Extract the complete expected vermagic from this load attempt only. This
- * retains vendor suffix tokens (for example `vivo`) without guessing them. */
+ * retains vendor tokens and trailing spaces without guessing their position.
+ * The module name and both values must be on the same complete diagnostic. */
 static int extract_required_vermagic(const char *text, const char *release,
 				     char *out, size_t out_size)
 {
+	static const char prefix[] = "nbdriver: version magic '";
+	static const char separator[] = "' should be '";
 	const char *line = text;
-	size_t found = 0, release_len = strlen(release);
+	size_t found = 0, release_len;
+	int error = -EINVAL;
+
 	if (!text || !release || !*release || !out || out_size < 2)
 		return -EINVAL;
+	release_len = strlen(release);
 	out[0] = '\0';
 	while (line && *line) {
+		char record[4096];
 		const char *end = strchr(line, '\n');
-		const char *mark = strstr(line, "should be '");
 		size_t line_len = end ? (size_t)(end - line) : strlen(line);
-		if (mark && (size_t)(mark - line) < line_len) {
-			const char *begin = mark + sizeof("should be '") - 1;
-			const char *close = memchr(begin, '\'',
-				line_len - (size_t)(begin - line));
-			if (close) {
-				size_t n = (size_t)(close - begin);
-				if (!n || n >= out_size || n <= release_len ||
-				    memcmp(begin, release, release_len) ||
-				    begin[release_len] != ' ')
-					return -EINVAL;
-				if (found && (strlen(out) != n || memcmp(out, begin, n)))
-					return -EEXIST;
-				memcpy(out, begin, n);
-				out[n] = '\0';
-				found = n;
-			}
+		size_t i, used = 0;
+		char *body, *mark, *close, *original, *required;
+
+		if (line_len >= sizeof(record)) {
+			error = -EOVERFLOW;
+			goto fail;
 		}
+		memcpy(record, line, line_len);
+		record[line_len] = '\0';
+		body = record;
+		/* /dev/kmsg adds priority,sequence,timestamp,flags; before text. */
+		if (*body >= '0' && *body <= '9') {
+			char *header_end = strchr(body, ';');
+			if (header_end)
+				body = header_end + 1;
+		}
+		if (strncmp(body, prefix, sizeof(prefix) - 1))
+			goto next;
+		/* kmsg escapes non-ASCII bytes and backslashes as \\xHH. Decode
+		 * once so vendor/Chinese uname releases retain their exact bytes. */
+		for (i = 0; body[i]; ++i) {
+			unsigned char c = (unsigned char)body[i];
+			if (c == '\\') {
+				int high, low;
+				if (strlen(body + i) < 4 || body[i + 1] != 'x')
+					goto fail;
+				high = klog_hex((unsigned char)body[i + 2]);
+				low = klog_hex((unsigned char)body[i + 3]);
+				if (high < 0 || low < 0)
+					goto fail;
+				c = (unsigned char)((high << 4) | low);
+				if (!c)
+					goto fail;
+				i += 3;
+			}
+			record[used++] = (char)c;
+		}
+		record[used] = '\0';
+		original = record + sizeof(prefix) - 1;
+		mark = strstr(original, separator);
+		if (!mark)
+			goto fail;
+		*mark = '\0';
+		required = mark + sizeof(separator) - 1;
+		close = strchr(required, '\'');
+		if (!close || close[1])
+			goto fail;
+		*close = '\0';
+		if (!nbdriver_valid_vermagic(original) ||
+		    !nbdriver_valid_vermagic(required) ||
+		    !strcmp(original, required))
+			goto fail;
+		{
+			size_t n = strlen(required);
+			if (n >= out_size || n <= release_len ||
+			    memcmp(required, release, release_len) ||
+			    required[release_len] != ' ')
+				goto fail;
+			if (found && (found != n || memcmp(out, required, n))) {
+				error = -EEXIST;
+				goto fail;
+			}
+			memcpy(out, required, n + 1);
+			found = n;
+		}
+next:
 		line = end ? end + 1 : NULL;
 	}
 	return found ? 0 : -ENOENT;
+fail:
+	out[0] = '\0';
+	return error;
 }
 
 static int open_klog_cursor(void)
@@ -400,15 +425,13 @@ static int collect_klog(int fd, char *out, size_t out_size)
 			break;
 		seen = 1;
 		take = (size_t)len;
-		if (take > out_size - used - 1)
-			take = out_size - used - 1;
-		if (take == 0)
-			break;
+		if (take > out_size - used - 1) {
+			out[0] = '\0';
+			return -EOVERFLOW;
+		}
 		memcpy(out + used, record, take);
 		used += take;
 		out[used] = '\0';
-		if (take < (size_t)len)
-			break;
 	}
 	return seen ? 0 : -ENODATA;
 }
@@ -571,7 +594,7 @@ int main(int argc, char **argv)
 		 * rejection was a vermagic mismatch. Rebuilding .modinfo is
 		 * pointless for any other error, so the log is the gate.
 		 */
-		if (!vermagic_retry) {
+		if (!vermagic_retry || rc != -ENOEXEC) {
 			return 81;
 		}
 
@@ -583,10 +606,6 @@ int main(int argc, char **argv)
 		}
 		close(kmsg_fd);
 		kmsg_fd = -1;
-		if (!log_shows_vermagic_mismatch(klog)) {
-			log_line("patch.vermagic", "skipped reason=not_vermagic");
-			return 81;
-		}
 		rc = extract_required_vermagic(klog, u.release, required_vermagic,
 					       sizeof(required_vermagic));
 		if (rc < 0) {
