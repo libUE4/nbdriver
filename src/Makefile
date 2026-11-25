@@ -7,6 +7,7 @@ nbdriver-y := nbdriver_core.o \
               nbdriver_runtime.o \
               nbdriver_platform.o \
               nbdriver_sf_groups.o \
+              nbdriver_config.o \
               nbdriver_udp.o \
               nbdriver_touch.o \
               nbdriver_gyro.o \

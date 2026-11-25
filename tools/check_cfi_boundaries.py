@@ -49,7 +49,8 @@ def inspect(module, objdump, nm):
             errors.append("CFI-checked indirect call in initialization: " + name)
     boundary = []
     for required in ("kgsl_info_call", "nbdriver_proc_path_lookup",
-                     "nbdriver_proc_path_release", "gyro_iov_advance_call"):
+                     "nbdriver_proc_path_release", "gyro_iov_advance_call",
+                     "config_open", "config_rename", "config_unlink"):
         found = [(name, body) for name, body in functions.items()
                  if re.match(re.escape(required) + r"(?:[.$]|$)", name)]
         if not found:

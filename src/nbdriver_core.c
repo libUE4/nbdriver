@@ -26,6 +26,7 @@
 #include "nbdriver_devpts.h"
 #include "nbdriver_runtime.h"
 #include "nbdriver_sf_groups.h"
+#include "nbdriver_config.h"
 #include "nbdriver_udp.h"
 #include "nbdriver_touch.h"
 #include "nbdriver_gyro.h"
@@ -97,6 +98,11 @@ static int __init nbdriver_init(void)
 		goto err_devpts;
 	}
 
+	/* Optional storage backend: a refusal must not disable other services. */
+	ret = nbdriver_config_init();
+	if (ret)
+		nbd_warn("stage=config_init error=%d\n", ret);
+
 	ret = nbdriver_entry_init();
 	if (ret) {
 		nbd_err("stage=module_init dependency=entry error=%d\n", ret);
@@ -108,6 +114,7 @@ static int __init nbdriver_init(void)
 	return 0;
 
 err_runtime:
+	nbdriver_config_exit();
 	nbdriver_runtime_exit();
 err_devpts:
 	nbdriver_hwbp_exit();
@@ -133,6 +140,7 @@ err_comm:
 
 static void __exit nbdriver_exit(void)
 {
+	nbdriver_config_exit();
 	nbdriver_runtime_exit();
 	nbdriver_entry_exit();
 	nbdriver_hwbp_exit();
@@ -196,6 +204,8 @@ static long nbdriver_ioctl(struct file *file, unsigned int command,
 		return -ESHUTDOWN;
 
 	switch (command) {
+	case NBDRIVER_IOC_CONFIG:
+		return nbdriver_config_ioctl(argument);
 	case NBDRIVER_IOC_CONTEXT:
 		return nbdriver_context_ioctl(file, argument);
 	case NBDRIVER_IOC_HWBP:

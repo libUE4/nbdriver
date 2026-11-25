@@ -259,6 +259,41 @@ struct nbdriver_sf_groups_request {
 	_IOWR(NBDRIVER_IOC_MAGIC, 0x24, struct nbdriver_sf_groups_request)
 
 
+/* Fixed configuration proxy. No caller paths or permanent credential changes.
+ * QUERY is the capability probe (the legacy 32 feature bits are exhausted).
+ * READ returns the complete file or fails E2BIG; WRITE atomically replaces it.
+ * DELETE is idempotent. All data is bounded to 64 KiB. Old modules: ENOTTY.
+ * stage identifies failure without exposing paths or configuration contents. */
+#define NBDRIVER_CONFIG_ABI_VERSION 1U
+#define NBDRIVER_CONFIG_MAX 65536U
+#define NBDRIVER_CONFIG_QUERY 0U
+#define NBDRIVER_CONFIG_READ 1U
+#define NBDRIVER_CONFIG_WRITE 2U
+#define NBDRIVER_CONFIG_DELETE 3U
+#define NBDRIVER_CONFIG_DFM 1U
+#define NBDRIVER_CONFIG_RUST 2U
+#define NBDRIVER_CONFIG_STAGE_VALIDATE 1U
+#define NBDRIVER_CONFIG_STAGE_IDENTITY 2U
+#define NBDRIVER_CONFIG_STAGE_DIRECTORY 3U
+#define NBDRIVER_CONFIG_STAGE_OPEN 4U
+#define NBDRIVER_CONFIG_STAGE_TRANSFER 5U
+#define NBDRIVER_CONFIG_STAGE_FILE_SYNC 6U
+#define NBDRIVER_CONFIG_STAGE_PUBLISH 7U
+#define NBDRIVER_CONFIG_STAGE_DIRECTORY_SYNC 8U
+#define NBDRIVER_CONFIG_STAGE_COPY 9U
+struct nbdriver_config_request {
+    nbdriver_u32 version;
+    nbdriver_u32 operation;
+    nbdriver_u32 config;
+    nbdriver_u32 size;
+    nbdriver_u64 buffer;
+    nbdriver_u32 transferred;
+    nbdriver_u32 stage;
+    nbdriver_u64 reserved;
+};
+#define NBDRIVER_IOC_CONFIG \
+    _IOWR(NBDRIVER_IOC_MAGIC, 0x30, struct nbdriver_config_request)
+
 /* Additive ABI 5 extensions; existing request layouts and ioctl numbers stay fixed. */
 #define NBDRIVER_QUERY_NAME_MAX 256U
 #define NBDRIVER_THREAD_NAME_MAX 16U

@@ -282,3 +282,20 @@ REPLY ioctl 成功只是接收，必须用 OUTCOME 查询实际提交，不把�
 消费者须处理未重新启用并报告失败，不把无记录伪称成功。消费者等待窗口为 20ms，还受用户回复 deadline_ns 限制，不能延长命中窗口；这不是硬实时调度保证。
 关闭最后一个拥有连接的 FD 或移除断点会取消待处理事件；复制 FD 共享所有权，工作线程应显式 REMOVE 自己的 handle。
 SVE/SME 活跃线程不提供可写 FPSIMD，交接失败不得使用旧快照替代。
+
+## SF 配置文件代理
+
+新增 `NBDRIVER_IOC_CONFIG`（ABI 5 的可选扩展，旧模块返回 `ENOTTY`）。
+请求使用 `nbdriver_config_request`：version=1，operation 为 QUERY/READ/WRITE/DELETE；
+QUERY 的 config/buffer/size 必须为零，其余操作只接受 DFM=1、Rust=2 两个固定配置 ID。
+路径由驱动固定为 `/data/misc/wmtrace/nbg/state/preferences.conf` 和 `rust-preferences.conf`，
+不接受任意路径。READ/WRITE 最多 65536 字节，DELETE 不带缓冲；reserved 必须为零。
+READ 要求缓冲足够容纳整个文件；WRITE 在同步临时文件后原子替换，再同步目录；
+DELETE 幂等。成功 ioctl 返回 0，并核对 transferred；失败返回 -1/errno，stage 标明失败阶段。
+目录同步失败可能已发布新内容，调用者必须显示失败并允许重试，不能承诺旧内容仍在。
+
+仅初始用户命名空间的完整 root 身份或已核实的真实 SurfaceFlinger 可调用。
+文件操作临时使用模块安装者的凭据，结束立即恢复；不永久改变 SF 的 UID/SELinux。
+因此安装者仍须具备该固定目录的访问权限。目录由现有 root 控制器预先创建，
+模块不修改平台父目录，不跟随链接，也不接受多链接或非普通配置文件。
+普通启动的配置读写保持原有用户层实现。
