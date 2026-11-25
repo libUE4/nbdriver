@@ -32,12 +32,16 @@ def inspect(module, objdump, nm):
                        "callers": callers, "pass": valid})
         if not valid:
             errors.append("missing direct exported call: " + name)
-    for name in ("kern_path", "path_put", "iov_iter_advance"):
+    for name in ("kern_path", "path_put", "iov_iter_advance",
+                 "override_creds", "revert_creds", "dput", "filp_open",
+                 "kernel_read", "kernel_write", "mnt_want_write", "mnt_drop_write",
+                 "vfs_fsync", "file_open_root", "vfs_rename", "vfs_unlink",
+                 "lookup_one", "lookup_one_len"):
         valid = name not in imports
         checks.append({"kind": "vendor_optional_import", "symbol": name,
                        "pass": valid})
         if not valid:
-            errors.append("vendor-unavailable path API became a static import: " + name)
+            errors.append("vendor-optional API became a static import: " + name)
     for name, body in functions.items():
         if not re.match(r"(?:nbdriver_(?:touch|kgsl|metadata)_init|"
                         r"nbdriver_proc_visibility_init)(?:[.$]|$)", name):
@@ -51,12 +55,24 @@ def inspect(module, objdump, nm):
     for required in ("kgsl_info_call", "nbdriver_proc_path_lookup",
                      "nbdriver_proc_path_release", "gyro_iov_advance_call",
                      "config_open", "config_rename", "config_unlink",
-                     "config_free_cred"):
+                     "config_free_cred", "config_dput", "config_filp_open",
+                     "config_read_bytes", "config_write_bytes", "config_sync",
+                     "config_want_write", "config_drop_write"):
         found = [(name, body) for name, body in functions.items()
                  if re.match(re.escape(required) + r"(?:[.$]|$)", name)]
         if not found:
             errors.append("missing isolated raw-symbol call boundary: " + required)
         boundary.extend(found)
+    # On 6.18 override/revert are header inlines. Earlier KMIs need the
+    # same isolated raw-call boundary as VFS, checked from the actual ELF.
+    for required in ("config_override", "config_revert"):
+        found = [(name, body) for name, body in functions.items()
+                 if re.match(re.escape(required) + r"(?:[.$]|$)", name)]
+        if not found:
+            errors.append("missing credential call boundary: " + required)
+        for name, body in found:
+            if re.search(r"\b(?:blr|br)\s+x\d+\b", body):
+                boundary.append((name, body))
     for name, body in boundary:
         # This tiny typed wrapper has one indirect call. Any sanitizer trap or
         # slowpath here recreates the raw-body failure; do not exempt the ioctl

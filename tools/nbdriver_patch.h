@@ -10,6 +10,27 @@
 
 #include <stddef.h>
 
+/* Complete kernel vermagic values can end in spaces. Preserve those bytes:
+ * vendor kernels use both "aarch64 vivo " and "vivo aarch64". Reject log
+ * delimiters and control characters instead of trimming valid metadata. */
+#define NBDRIVER_VERMAGIC_MAX 1024U
+static inline int nbdriver_valid_vermagic(const char *magic)
+{
+	size_t i;
+
+	if (!magic || !*magic || *magic == ' ')
+		return 0;
+	for (i = 0; i <= NBDRIVER_VERMAGIC_MAX; ++i) {
+		unsigned char c = (unsigned char)magic[i];
+
+		if (!c)
+			return 1;
+		if (c < ' ' || c == '\'' || c == 127)
+			return 0;
+	}
+	return 0;
+}
+
 /*
  * Rewrite only explicitly allowlisted undefined symbols to absolute
  * addresses taken from a kallsyms dump. This bypasses normal export/KMI
@@ -34,6 +55,7 @@ int nbdriver_patch_symbols(const char *in_path, const char *out_path,
  * preserving the original space-separated feature/architecture suffix when
  * @magic is a single token. If @magic contains spaces, use it as the exact
  * complete vermagic string (only after verifying it against the kernel log).
+ * Trailing spaces in a complete string are significant and retained.
  * The section is rebuilt
  * rather than truncated, so the new string may be longer or shorter than the
  * original; other section offsets stay unchanged. Returns 0 on success and sets @changed_out to 1 when the entry

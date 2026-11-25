@@ -535,8 +535,7 @@ int nbdriver_patch_vermagic(const char *in_path, const char *out_path,
 		*changed_out = 0;
 	if (log && log_size)
 		log[0] = '\0';
-	if (!magic || !*magic || strpbrk(magic, "\t\r\n\f\v") ||
-	    magic[0] == ' ' || magic[strlen(magic) - 1] == ' ') {
+	if (!nbdriver_valid_vermagic(magic)) {
 		snprintf(log, log_size, "invalid_release");
 		return -EINVAL;
 	}
