@@ -30,12 +30,20 @@ MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 
 static const struct cred *config_cred;
 static DEFINE_MUTEX(config_lock);
+static __typeof__(&filp_open) config_filp_open_fn;
+static __typeof__(&kernel_read) config_kernel_read_fn;
+static __typeof__(&kernel_write) config_kernel_write_fn;
+static __typeof__(&mnt_want_write) config_mnt_want_write_fn;
+static __typeof__(&mnt_drop_write) config_mnt_drop_write_fn;
+static __typeof__(&vfs_fsync) config_fsync_fn;
 static __typeof__(&vfs_rename) config_rename_fn;
 static __typeof__(&vfs_unlink) config_unlink_fn;
 static __typeof__(&file_open_root) config_open_fn;
 static __typeof__(&__put_cred) config_release_cred_fn;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
 static __typeof__(&lookup_one) config_lookup_fn;
+#else
+static __typeof__(&lookup_one_len) config_lookup_len_fn;
 #endif
 
 static noinline void NBDRIVER_NO_CFI config_free_cred(struct cred *cred)
@@ -94,6 +102,24 @@ void nbdriver_config_exit(void)
 
 static int config_resolve(void)
 {
+    if (!config_filp_open_fn)
+        config_filp_open_fn = (__typeof__(config_filp_open_fn))
+            nbdriver_ksym_lookup_optional("filp_open");
+    if (!config_kernel_read_fn)
+        config_kernel_read_fn = (__typeof__(config_kernel_read_fn))
+            nbdriver_ksym_lookup_optional("kernel_read");
+    if (!config_kernel_write_fn)
+        config_kernel_write_fn = (__typeof__(config_kernel_write_fn))
+            nbdriver_ksym_lookup_optional("kernel_write");
+    if (!config_mnt_want_write_fn)
+        config_mnt_want_write_fn = (__typeof__(config_mnt_want_write_fn))
+            nbdriver_ksym_lookup_optional("mnt_want_write");
+    if (!config_mnt_drop_write_fn)
+        config_mnt_drop_write_fn = (__typeof__(config_mnt_drop_write_fn))
+            nbdriver_ksym_lookup_optional("mnt_drop_write");
+    if (!config_fsync_fn)
+        config_fsync_fn = (__typeof__(config_fsync_fn))
+            nbdriver_ksym_lookup_optional("vfs_fsync");
     if (!config_open_fn)
         config_open_fn = (__typeof__(config_open_fn))nbdriver_ksym_lookup_optional("file_open_root");
     if (!config_rename_fn)
@@ -105,8 +131,20 @@ static int config_resolve(void)
         config_lookup_fn = (__typeof__(config_lookup_fn))nbdriver_ksym_lookup_optional("lookup_one");
     if (!config_lookup_fn)
         return -EOPNOTSUPP;
+#else
+    if (!config_lookup_len_fn)
+        config_lookup_len_fn = (__typeof__(config_lookup_len_fn))
+            nbdriver_ksym_lookup_optional("lookup_one_len");
 #endif
-    return config_open_fn && config_rename_fn && config_unlink_fn ? 0 : -EOPNOTSUPP;
+    return config_filp_open_fn && config_kernel_read_fn && config_kernel_write_fn &&
+        config_mnt_want_write_fn && config_mnt_drop_write_fn && config_fsync_fn &&
+        config_open_fn && config_rename_fn && config_unlink_fn
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+        && config_lookup_fn
+#else
+        && config_lookup_len_fn
+#endif
+        ? 0 : -EOPNOTSUPP;
 }
 
 /* Raw-symbol boundaries stay typed and isolated; registered ioctl retains CFI. */
@@ -165,7 +203,7 @@ config_lookup(struct file *dir, const char *name)
     struct qstr q = QSTR_INIT(name, strlen(name));
     return config_lookup_fn(mnt_idmap(dir->f_path.mnt), &q, dir->f_path.dentry);
 #else
-    return lookup_one_len(name, dir->f_path.dentry, strlen(name));
+    return config_lookup_len_fn(name, dir->f_path.dentry, strlen(name));
 #endif
 }
 
@@ -183,7 +221,7 @@ static struct file *config_directory(void)
     struct file *parent, *child;
     const char *const children[] = { "nbg", "state" };
     int i;
-    parent = filp_open("/data/misc/wmtrace", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
+    parent = config_filp_open_fn("/data/misc/wmtrace", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
     for (i = 0; !IS_ERR(parent); ++i) {
         if (!private_inode(file_inode(parent), true)) {
             fput(parent);
@@ -205,7 +243,7 @@ static int config_change(struct file *dir, const char *name, struct file *temp)
     struct dentry *target, *source = NULL;
     struct inode *inode;
     int error;
-    error = mnt_want_write(dir->f_path.mnt);
+    error = config_mnt_want_write_fn(dir->f_path.mnt);
     if (error)
         return error;
     inode_lock_nested(file_inode(dir), I_MUTEX_PARENT);
@@ -233,7 +271,7 @@ target_out:
     dput(target);
 unlock:
     inode_unlock(file_inode(dir));
-    mnt_drop_write(dir->f_path.mnt);
+    config_mnt_drop_write_fn(dir->f_path.mnt);
     return error;
 }
 
@@ -258,7 +296,7 @@ static int config_read(struct file *dir, const char *name, void *bytes,
         goto out;
     }
     while (pos < size) {
-        ssize_t n = kernel_read(file, (char *)bytes + pos, size - pos, &pos);
+        ssize_t n = config_kernel_read_fn(file, (char *)bytes + pos, size - pos, &pos);
         if (n <= 0) { error = n < 0 ? n : -EIO; goto out; }
     }
     if (i_size_read(file_inode(file)) != size) { error = -ESTALE; goto out; }
@@ -287,11 +325,11 @@ static int config_write(struct file *dir, const char *name, void *bytes,
     if (!private_inode(file_inode(temp), false)) { error = -EACCES; goto out; }
     r->stage = NBDRIVER_CONFIG_STAGE_TRANSFER;
     while (pos < r->size) {
-        ssize_t n = kernel_write(temp, (char *)bytes + pos, r->size - pos, &pos);
+        ssize_t n = config_kernel_write_fn(temp, (char *)bytes + pos, r->size - pos, &pos);
         if (n <= 0) { error = n < 0 ? n : -EIO; goto out; }
     }
     r->stage = NBDRIVER_CONFIG_STAGE_FILE_SYNC;
-    error = vfs_fsync(temp, 0);
+    error = config_fsync_fn(temp, 0);
     if (error)
         goto out;
     r->stage = NBDRIVER_CONFIG_STAGE_PUBLISH;
@@ -300,7 +338,7 @@ static int config_write(struct file *dir, const char *name, void *bytes,
         goto out;
     r->transferred = r->size;
     r->stage = NBDRIVER_CONFIG_STAGE_DIRECTORY_SYNC;
-    error = vfs_fsync(dir, 0);
+    error = config_fsync_fn(dir, 0);
 out:
     fput(temp);
     cleanup = config_change(dir, tmp, NULL);
@@ -369,7 +407,7 @@ long nbdriver_config_ioctl(unsigned long argument)
             error = config_change(dir, name, NULL);
             if (!error) {
                 r.stage = NBDRIVER_CONFIG_STAGE_DIRECTORY_SYNC;
-                error = vfs_fsync(dir, 0);
+                error = config_fsync_fn(dir, 0);
             }
         }
         fput(dir);
