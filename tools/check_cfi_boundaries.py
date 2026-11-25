@@ -50,7 +50,8 @@ def inspect(module, objdump, nm):
     boundary = []
     for required in ("kgsl_info_call", "nbdriver_proc_path_lookup",
                      "nbdriver_proc_path_release", "gyro_iov_advance_call",
-                     "config_open", "config_rename", "config_unlink"):
+                     "config_open", "config_rename", "config_unlink",
+                     "config_put_cred"):
         found = [(name, body) for name, body in functions.items()
                  if re.match(re.escape(required) + r"(?:[.$]|$)", name)]
         if not found:

@@ -2,6 +2,7 @@
 /* Configuration-only file proxy. Uses the module installer's immutable creds
  * for a bounded operation, never commits credentials to a host task. */
 #include <linux/cred.h>
+#include <linux/build_bug.h>
 #include <linux/dcache.h>
 #include <linux/err.h>
 #include <linux/file.h>
@@ -32,6 +33,29 @@ static DEFINE_MUTEX(config_lock);
 static __typeof__(&vfs_rename) config_rename_fn;
 static __typeof__(&vfs_unlink) config_unlink_fn;
 static __typeof__(&file_open_root) config_open_fn;
+static __typeof__(&__put_cred) config_release_cred_fn;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+static __typeof__(&lookup_one) config_lookup_fn;
+#endif
+
+static noinline void NBDRIVER_NO_CFI config_put_cred(const struct cred *value)
+{
+    struct cred *cred = (struct cred *)value;
+    bool last;
+    if (!cred)
+        return;
+#ifdef CONFIG_DEBUG_CREDENTIALS
+    validate_creds(cred);
+#endif
+    BUILD_BUG_ON(!__builtin_types_compatible_p(__typeof__(cred->usage), atomic_t) &&
+                 !__builtin_types_compatible_p(__typeof__(cred->usage), atomic_long_t));
+    last = __builtin_choose_expr(
+        __builtin_types_compatible_p(__typeof__(cred->usage), atomic_long_t),
+        atomic_long_dec_and_test((atomic_long_t *)&cred->usage),
+        atomic_dec_and_test((atomic_t *)&cred->usage));
+    if (last)
+        config_release_cred_fn(cred);
+}
 
 static bool root_caller(void)
 {
@@ -47,6 +71,10 @@ int nbdriver_config_init(void)
      * Capturing it avoids guessing KSU/Magisk SELinux domain names. */
     if (!root_caller())
         return -EACCES;
+    config_release_cred_fn = (__typeof__(config_release_cred_fn))
+        nbdriver_ksym_lookup_optional("__put_cred");
+    if (!config_release_cred_fn)
+        return -EOPNOTSUPP;
     config_cred = get_current_cred();
     return 0;
 }
@@ -54,7 +82,7 @@ int nbdriver_config_init(void)
 void nbdriver_config_exit(void)
 {
     if (config_cred) {
-        put_cred(config_cred);
+        config_put_cred(config_cred);
         config_cred = NULL;
     }
 }
@@ -67,6 +95,12 @@ static int config_resolve(void)
         config_rename_fn = (__typeof__(config_rename_fn))nbdriver_ksym_lookup_optional("vfs_rename");
     if (!config_unlink_fn)
         config_unlink_fn = (__typeof__(config_unlink_fn))nbdriver_ksym_lookup_optional("vfs_unlink");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+    if (!config_lookup_fn)
+        config_lookup_fn = (__typeof__(config_lookup_fn))nbdriver_ksym_lookup_optional("lookup_one");
+    if (!config_lookup_fn)
+        return -EOPNOTSUPP;
+#endif
     return config_open_fn && config_rename_fn && config_unlink_fn ? 0 : -EOPNOTSUPP;
 }
 
@@ -119,6 +153,17 @@ config_rename(struct file *directory, struct dentry *old, struct dentry *new)
 #endif
 }
 
+static noinline struct dentry *NBDRIVER_NO_CFI
+config_lookup(struct file *dir, const char *name)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+    struct qstr q = QSTR_INIT(name, strlen(name));
+    return config_lookup_fn(mnt_idmap(dir->f_path.mnt), &q, dir->f_path.dentry);
+#else
+    return lookup_one_len(name, dir->f_path.dentry, strlen(name));
+#endif
+}
+
 static bool private_inode(struct inode *inode, bool directory)
 {
     return inode && (uid_eq(inode->i_uid, GLOBAL_ROOT_UID) ||
@@ -159,7 +204,7 @@ static int config_change(struct file *dir, const char *name, struct file *temp)
     if (error)
         return error;
     inode_lock_nested(file_inode(dir), I_MUTEX_PARENT);
-    target = lookup_one_len(name, dir->f_path.dentry, strlen(name));
+    target = config_lookup(dir, name);
     if (IS_ERR(target)) {
         error = PTR_ERR(target);
         goto unlock;
@@ -307,6 +352,8 @@ long nbdriver_config_ioctl(unsigned long argument)
     dir = config_directory();
     if (IS_ERR(dir)) {
         error = PTR_ERR(dir);
+        if (error == -ENOENT && r.operation == NBDRIVER_CONFIG_DELETE)
+            error = 0;
     } else {
         if (r.operation == NBDRIVER_CONFIG_READ)
             error = config_read(dir, name, bytes, &r);
