@@ -54,7 +54,7 @@ static noinline void NBDRIVER_NO_CFI config_put_cred(const struct cred *value)
         atomic_long_dec_and_test((atomic_long_t *)&cred->usage),
         atomic_dec_and_test((atomic_t *)&cred->usage));
     if (last)
-        config_release_cred_fn(cred);
+        READ_ONCE(config_release_cred_fn)(cred);
 }
 
 static bool root_caller(void)

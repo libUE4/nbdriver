@@ -67,6 +67,7 @@ def inspect(module, objdump, nm):
         checks.append({"kind": "private_abi_boundary", "function": name,
                        "indirect_transfer": call, "pass": valid})
         if not valid:
+            checks[-1]["disassembly"] = body
             errors.append("unsafe raw-body call boundary: " + name)
     if "sock_from_file" in imports:
         errors.append("vendor-unavailable sock_from_file became a static import")
