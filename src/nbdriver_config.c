@@ -38,6 +38,11 @@ static __typeof__(&__put_cred) config_release_cred_fn;
 static __typeof__(&lookup_one) config_lookup_fn;
 #endif
 
+static noinline void NBDRIVER_NO_CFI config_free_cred(struct cred *cred)
+{
+    READ_ONCE(config_release_cred_fn)(cred);
+}
+
 static noinline void NBDRIVER_NO_CFI config_put_cred(const struct cred *value)
 {
     struct cred *cred = (struct cred *)value;
@@ -54,7 +59,7 @@ static noinline void NBDRIVER_NO_CFI config_put_cred(const struct cred *value)
         atomic_long_dec_and_test((atomic_long_t *)&cred->usage),
         atomic_dec_and_test((atomic_t *)&cred->usage));
     if (last)
-        READ_ONCE(config_release_cred_fn)(cred);
+        config_free_cred(cred);
 }
 
 static bool root_caller(void)
