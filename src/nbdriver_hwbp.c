@@ -34,6 +34,7 @@
 #include <linux/vmalloc.h>
 #include <asm/esr.h>
 #include <asm/compat.h>
+#include <asm/debug-monitors.h>
 #include <asm/ptrace.h>
 #include "nbdriver_hwbp.h"
 #include "nbdriver_hwbp_regs.h"
@@ -47,8 +48,18 @@
 static_assert(sizeof(struct nbdriver_hwbp_request) == 128);
 static_assert(sizeof(struct nbdriver_hwbp_record) == 320);
 
+/* The debug ABI uses a 32-bit ESR on 5.10/5.15 and a 64-bit ESR on newer
+ * kernels. Both the exception table and debug hooks use that same type.
+ * Derive it from the target headers: a register-compatible but differently
+ * typed callback still fails CFI when the first debug exception is dispatched.
+ * No default: an unfamiliar debug-hook ABI must fail compilation.
+ */
+typedef typeof(_Generic(((struct step_hook *)0)->fn,
+    int (*)(struct pt_regs *, unsigned int): 0U,
+    int (*)(struct pt_regs *, unsigned long): 0UL)) hwb_esr_t;
+
 struct hwb_fault_info {
-    int (*fn)(unsigned long, unsigned long, struct pt_regs *);
+    int (*fn)(unsigned long, hwb_esr_t, struct pt_regs *);
     int sig, code;
     const char *name;
 };
@@ -80,8 +91,8 @@ static atomic64_t hwb_next_handle = ATOMIC64_INIT(0);
 static unsigned int hwb_brps, hwb_wrps, hwb_hw_wrps;
 static struct hwb_fault_info *hwb_faults;
 static int hwb_bp_index = -1, hwb_wp_index = -1;
-static int (*hwb_original_bp)(unsigned long, unsigned long, struct pt_regs *);
-static int (*hwb_original_wp)(unsigned long, unsigned long, struct pt_regs *);
+static int (*hwb_original_bp)(unsigned long, hwb_esr_t, struct pt_regs *);
+static int (*hwb_original_wp)(unsigned long, hwb_esr_t, struct pt_regs *);
 static bool hwb_available, hwb_pm_registered;
 static int hwb_init_error = -EOPNOTSUPP;
 static int hwb_cpuhp = CPUHP_INVALID;
@@ -192,7 +203,7 @@ static void hwb_disarm(struct hwb_point *point, unsigned int slot,
 }
 
 /* Keep retiring entries until all CPU slots and in-flight handlers drain. */
-static int hwb_breakpoint(unsigned long address, unsigned long esr, struct pt_regs *regs)
+static int hwb_breakpoint(unsigned long address, hwb_esr_t esr, struct pt_regs *regs)
 {
     unsigned long irqflags;
     unsigned int slot;
@@ -226,7 +237,7 @@ original:
     return result;
 }
 
-static int hwb_watchpoint(unsigned long fault, unsigned long esr, struct pt_regs *regs)
+static int hwb_watchpoint(unsigned long fault, hwb_esr_t esr, struct pt_regs *regs)
 {
     unsigned long irqflags;
     unsigned int slot, closest = 8, local_brps, local_wrps;
@@ -658,7 +669,7 @@ void nbdriver_hwbp_init(void)
     hwb_init_error = 0;
     hwb_available = true;
     nbdriver_context_init();
-    nbd_info("stage=hwbp status=ready backend=raw_register exec_slots=%u watch_slots=%u mode=capture_once cpu_state=dynamic_percpu slot_policy=target_override\n", hwb_brps, hwb_wrps);
+    nbd_info("stage=hwbp status=ready backend=raw_register exec_slots=%u watch_slots=%u mode=capture_once cpu_state=dynamic_percpu slot_policy=target_override esr_bits=%zu\n", hwb_brps, hwb_wrps, sizeof(hwb_esr_t) * 8);
     return;
 unavailable:
     hwb_init_error = error;
